@@ -1,5 +1,6 @@
 import torch
 
+
 def resolve_device(name: str = "auto") -> torch.device:
     if name != "auto":
         return torch.device(name)

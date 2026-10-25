@@ -10,7 +10,9 @@ class Request:
 
     # eg: given a budget of 512 tokens , but prompt size of 1000 tokens, we first do 512 tokens and then the rest 488
     #
-    def __init__(self,request_id: str,prompt_ids:list[int],params:SamplingParams) -> None:
+    def __init__(
+        self, request_id: str, prompt_ids: list[int], params: SamplingParams
+    ) -> None:
         self.request_id = request_id
         self.prompt_len = len(prompt_ids)
 
@@ -24,11 +26,11 @@ class Request:
         # request the page table (what block contain the KV cache for this specific request?)
         self.block_ids: list[int] = []
 
-        self.block_hashes :list[int] = []
-        self.num_cached_tokens =  0 # prefix-cache hits at admission
+        self.block_hashes: list[int] = []
+        self.num_cached_tokens = 0  # prefix-cache hits at admission
         self.logprobs: list[torch.Tensor] = []
         self.finished = False
-        self.finish_reason : str | None = None
+        self.finish_reason: str | None = None
 
     @property
     def num_tokens(self):
@@ -37,4 +39,4 @@ class Request:
     @property
     def output_ids(self):
         # return everything after the prompt of what we generated
-        return self.token_ids[self.prompt_len:]
+        return self.token_ids[self.prompt_len :]

@@ -6,11 +6,13 @@ import warnings
 
 try:
     from mps_flash_attn import flash_attention
+
     FLASH_ATTN_AVAILABLE = True
-except Exception as _ :
+except Exception as _:
     FLASH_ATTN_AVAILABLE = False
 
 from .platform import resolve_device
+
 
 @dataclass
 class Config:
@@ -59,9 +61,8 @@ class Config:
                 self.use_cuda_graphs = False
 
         if self.block_size == 0:
-            self.block_size = (
-                256 if self.attention_backend == "flash_attn" else 16
-            )
+            self.block_size = 256 if self.attention_backend == "flash_attn" else 16
+
 
 @dataclass
 class SamplingParams:
