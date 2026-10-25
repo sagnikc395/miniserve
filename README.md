@@ -17,3 +17,7 @@ This uses a simplified implementation of
 - [Continuous Batching](https://huggingface.co/blog/continuous_batching)
 - [Chunked Prefill](https://medium.com/@shirleyzhai521/how-chunked-prefill-improves-llm-serving-in-vllm-b3705dea557f)
 - [SDPA](https://docs.pytorch.org/docs/2.14/generated/torch.nn.functional.scaled_dot_product_attention.html)
+
+### Future Work
+- [Speculative Decoding](https://research.google/blog/looking-back-at-speculative-decoding/)
+- [Implementing Speculative Decoding in PyTorch](https://github.com/romsto/Speculative-Decoding)
