@@ -35,4 +35,25 @@ class KVCacheManager:
                     (parent,tuple(req.token_ids[i * bs: (i+1) * bs]))
                 )
             )
-        return bs
+
+    def find_cached_prefix(self,req):
+        # if we are not doing prefix caching, this wont work
+        if not self.enable_caching:
+            return []
+
+        self.update_hashes(req)
+
+        # [A B C D E F G H I]
+        # [A B C D E F G H X]
+        # A-H IS IN KV Cache and Hashed , technically reused the previos once then | X and predict the next token
+        # use only the maximally matching blocks , so atleast 1 token to compute on
+        max_blocks = (req.num_tokens - 1) // self.block_size
+        # cache hits
+        hits = []
+        for h in req.block_hashes[:max_blocks]:
+            block_id = self.hash_to_block.get(h)
+            if block_id is None:
+                break
+            hits.append(block_id)
+
+        return hits
