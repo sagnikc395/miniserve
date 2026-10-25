@@ -13,7 +13,26 @@ class KVCacheManager:
         self.block_hash: list[int|None] = [None] * num_blocks
 
         #our LRU queue , to free up the blocks , list of of our unused blocks
+        # maps the block_index and the hash
         self.free: OrderedDict[int,None] = OrderedDict((i,None) for i in range(1, num_blocks))
 
         # now given this prefix hash, where is its kv data (hash -> physical block) ?
         self.hash_to_block: dict[int,int] = {}
+
+    @property
+    def num_free(self):
+        # keep track of how many available blocks
+        return len(self.free)
+
+    def update_hashes(self,req):
+        bs = self.block_size
+        while len(req.block_hashes) < (req.num_tokens // bs):
+            # only hash a full block
+            i = len(req.block_hashes)
+            parent = req.block_hashes[-1] if req.block_hashes else None
+            req.block_hashes.append(
+                hash(
+                    (parent,tuple(req.token_ids[i * bs: (i+1) * bs]))
+                )
+            )
+        return bs
