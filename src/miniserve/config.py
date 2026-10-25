@@ -10,7 +10,7 @@ try:
 except Exception as _ :
     FLASH_ATTN_AVAILABLE = False
 
-from .serve import resolve_device
+from .platform import resolve_device
 
 @dataclass
 class Config:

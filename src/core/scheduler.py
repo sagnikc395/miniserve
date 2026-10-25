@@ -36,5 +36,5 @@ class Request:
 
     @property
     def output_ids(self):
-        # return everything after the prompt of what we generated ,
+        # return everything after the prompt of what we generated
         return self.token_ids[self.prompt_len:]

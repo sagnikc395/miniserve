@@ -145,3 +145,324 @@ On MPS:
 - Replace "CUDA graphs" with static shapes + preallocation + Metal fusion / one command buffer.
 
 For a learning-oriented vLLM clone, dense slots + SDPA is the honest first implementation; the paged Metal decode kernel is the piece worth building once long-context concurrency matters.
+
+You do **not** need to replace CUDA graphs or FlashAttention to make this work. TinyServe’s scheduler, paged KV cache, prefix caching, continuous batching, and chunked prefill can remain unchanged.
+
+The macOS port mainly needs four changes:
+
+1. Use PyTorch’s **MPS** device instead of CUDA.
+2. Use the existing `"torch"` attention backend.
+3. Disable CUDA graph capture.
+4. Replace CUDA-specific memory accounting and synchronization.
+
+PyTorch MPS supports moving models and tensors to an `mps` device just as you would with CUDA.
+
+## 1. Add device and memory helpers
+
+Near the imports in `serve.py`, add:
+
+```python
+def resolve_device(name: str = "auto") -> torch.device:
+    if name != "auto":
+        return torch.device(name)
+
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+
+def synchronize(device: torch.device):
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    elif device.type == "mps":
+        torch.mps.synchronize()
+
+
+def empty_device_cache(device: torch.device):
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    elif device.type == "mps":
+        torch.mps.empty_cache()
+
+
+def device_memory(device: torch.device) -> tuple[int, int]:
+    """Return (recommended_total_bytes, currently_allocated_bytes)."""
+    if device.type == "cuda":
+        total = torch.cuda.get_device_properties(device).total_memory
+        allocated = torch.cuda.memory_allocated(device)
+        return total, allocated
+
+    if device.type == "mps":
+        return (
+            torch.mps.recommended_max_memory(),
+            torch.mps.current_allocated_memory(),
+        )
+
+    # CPU is useful for debugging, but choose a conservative explicit budget.
+    return 8 * 1024**3, 0
+```
+
+On MPS, `recommended_max_memory()` represents Metal’s recommended working-set size, so it is a better starting point for KV-cache sizing than treating all unified RAM as GPU memory.
+
+## 2. Make `Config` select MPS automatically
+
+Replace the relevant parts of `Config` with something like:
+
+```python
+@dataclass
+class Config:
+    model: str
+    device: torch.device | str = "auto"
+    dtype: torch.dtype | None = None
+
+    max_model_len: int = 4096
+    attention_backend: str = "auto"  # "auto" | "flash_attn" | "torch"
+    block_size: int = 0
+
+    max_num_seqs: int = 16
+    max_num_batched_tokens: int = 1024
+    gpu_memory_utilization: float = 0.60
+
+    enable_prefix_caching: bool = True
+    use_cuda_graphs: bool = False
+    seed: int = 0
+
+    def __post_init__(self):
+        self.device = resolve_device(str(self.device))
+
+        if self.dtype is None:
+            if self.device.type == "mps":
+                # A good compatibility default on Apple Silicon.
+                self.dtype = torch.float16
+            elif self.device.type == "cuda":
+                self.dtype = torch.bfloat16
+            else:
+                self.dtype = torch.float32
+
+        if self.device.type != "cuda":
+            self.attention_backend = "torch"
+            self.use_cuda_graphs = False
+        else:
+            if self.attention_backend == "auto":
+                self.attention_backend = (
+                    "flash_attn" if FLASH_ATTN_AVAILABLE else "torch"
+                )
+
+            if self.attention_backend == "flash_attn" and not FLASH_ATTN_AVAILABLE:
+                warnings.warn("FlashAttention unavailable; using torch attention")
+                self.attention_backend = "torch"
+
+            if self.attention_backend == "torch":
+                self.use_cuda_graphs = False
+
+        if self.block_size == 0:
+            self.block_size = (
+                256 if self.attention_backend == "flash_attn" else 16
+            )
+```
+
+`float16` is a conservative initial choice for MPS compatibility. Once everything works, you can test `bfloat16` with your particular PyTorch/macOS versions.
+
+## 3. Update `ModelRunner`
+
+Inside `ModelRunner.__init__`, use the configured device:
+
+```python
+self.device = self.cfg.device
+self.dtype = self.cfg.dtype
+```
+
+Then update the model loading, weight loading, KV-cache allocation, and input preparation:
+
+```python
+# Instead of:
+# device = "cuda"
+# tensor.cuda()
+# tensor.to("cuda")
+# torch.tensor(..., device="cuda")
+
+device = self.device
+tensor = tensor.to(self.device)
+tensor = torch.tensor(..., device=self.device)
+```
+
+Also change model initialization to use your selected dtype:
+
+```python
+self.model = self.model.to(
+    device=self.device,
+    dtype=self.dtype,
+)
+```
+
+Be careful not to convert integer tensors to `self.dtype`: token IDs, positions, block tables, and slot mappings must remain `torch.long` or `torch.int32`.
+
+Use this substitution table throughout the runner:
+
+| CUDA code | Portable replacement |
+|---|---|
+| `torch.cuda.manual_seed_all(seed)` | `torch.manual_seed(seed)` |
+| `torch.cuda.synchronize()` | `synchronize(self.device)` |
+| `torch.cuda.empty_cache()` | `empty_device_cache(self.device)` |
+| `torch.cuda.memory_allocated()` | `device_memory(self.device)[1]` |
+| `torch.cuda.get_device_properties(0).total_memory` | `device_memory(self.device)[0]` |
+| `.cuda()` | `.to(self.device)` |
+| `device="cuda"` | `device=self.device` |
+
+Your KV-cache sizing can then remain structurally the same:
+
+```python
+total_memory, allocated = device_memory(self.device)
+
+kv_budget = (
+    int(total_memory * self.cfg.gpu_memory_utilization)
+    - allocated
+)
+
+num_blocks = max(1, kv_budget // bytes_per_kv_block)
+```
+
+The existing CUDA-graph implementation can stay in the file; simply ensure its initialization/capture methods are never called when `device.type != "cuda"`.
+
+If the code uses `pin_memory=True`, enable it only for CUDA:
+
+```python
+pin_memory = self.device.type == "cuda"
+```
+
+## 4. Keep the paged KV cache, but initially use reference attention
+
+The existing pure-PyTorch attention path is the correct first port. FlashAttention’s paged kernel is CUDA-specific, but your page tables and cache layout do not depend on CUDA.
+
+Conceptually, the MPS path will do this:
+
+```python
+# Already performed by tinyserve:
+k_cache.view(-1, num_kv_heads, head_dim).index_copy_(
+    0, slot_mapping, k_new
+)
+v_cache.view(-1, num_kv_heads, head_dim).index_copy_(
+    0, slot_mapping, v_new
+)
+
+# Then gather each request's pages and run normal PyTorch attention.
+output = torch_ref_attention(
+    q, k_cache, v_cache, attn_metadata, scale
+)
+```
+
+This is not as fast as a fused Metal paged-attention kernel, but it should provide the simplest correctness baseline.
+
+After that baseline works, you can optimize `torch_ref_attention` using `F.scaled_dot_product_attention`. For each request:
+
+1. Gather its KV pages.
+2. Slice to its actual sequence length.
+3. Expand KV heads for GQA with `repeat_interleave`.
+4. Pass an **explicit causal mask**, especially for chunked prefill.
+
+The mask for a request with `context_len` cached tokens is:
+
+```python
+query_positions = context_len + torch.arange(
+    query_len, device=q.device
+)
+key_positions = torch.arange(seq_len, device=q.device)
+
+# True means attention is allowed.
+causal_mask = (
+    key_positions.unsqueeze(0)
+    <= query_positions.unsqueeze(1)
+)
+```
+
+Do not initially add `torch.compile`; get eager-mode MPS working first. CUDA graphs are only an optimization and are unnecessary for correctness.
+
+## 5. Fix the benchmark and attention demo separately
+
+The serving path is not the only place with CUDA calls. In `benchmark()` and `hf_static_generate()`:
+
+```python
+hf = AutoModelForCausalLM.from_pretrained(
+    a.model,
+    dtype=cfg.dtype,
+    attn_implementation="sdpa",
+).to(cfg.device).eval()
+```
+
+Instead of `ids.cuda()` and `mask.cuda()`:
+
+```python
+device = next(model.parameters()).device
+
+gen = model.generate(
+    input_ids=ids.to(device),
+    attention_mask=mask.to(device),
+    do_sample=False,
+    max_new_tokens=max_tokens,
+    min_new_tokens=max_tokens if ignore_eos else 0,
+    eos_token_id=list(stop_ids),
+    pad_token_id=pad_id,
+)
+
+synchronize(device)
+```
+
+Replace benchmark cleanup with:
+
+```python
+gc.collect()
+empty_device_cache(cfg.device)
+```
+
+In `attention_demo()`, use:
+
+```python
+dev = "mps" if torch.backends.mps.is_available() else "cpu"
+dt = torch.float16 if dev == "mps" else torch.float32
+```
+
+Only call `flash_attention()` when FlashAttention is actually available; otherwise compare or run just the reference implementation.
+
+## 6. Start with a small model
+
+Do not install `flash-attn` on macOS. Install only the regular dependencies:
+
+```bash
+python3 -m pip install -U \
+  torch transformers datasets huggingface_hub safetensors \
+  fastapi uvicorn pandas numpy openai
+```
+
+Check MPS:
+
+```bash
+python3 -c \
+'import torch; print(torch.__version__); print(torch.backends.mps.is_available())'
+```
+
+Then start conservatively:
+
+```bash
+python3 serve.py generate \
+  --model Qwen/Qwen3-1.7B \
+  --attention-backend torch \
+  --no-cuda-graphs \
+  --gpu-memory-utilization 0.60 \
+  --max-num-seqs 4 \
+  --max-num-batched-tokens 512 \
+  --max-model-len 4096 \
+  --prompt "The capital of France is" \
+  --max-tokens 32
+```
+
+On a 16 GB Mac, the default 8B model is a poor first test: FP16 weights alone consume roughly 16 GB before KV cache, runtime allocations, macOS, and other applications. A 0.6B or 1.7B model gives you a much cleaner porting target.
+
+If you encounter an isolated unsupported MPS operator, you can temporarily diagnose it with:
+
+```bash
+PYTORCH_ENABLE_MPS_FALLBACK=1 python3 serve.py generate ...
+```
+
+That may move unsupported operations to the CPU, so use it as a compatibility diagnostic rather than the permanent performance configuration. Once basic generation passes, test prefix-cache reuse, chunked prefill, and streaming independently before optimizing attention.
