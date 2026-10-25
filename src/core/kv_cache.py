@@ -82,3 +82,25 @@ class KVCacheManager:
 
             self.ref_cnt[block_idx] += 1
             req.block_ids.append(block_idx)
+
+        # allocated new blocks
+        for _ in range(max(need,0)):
+            b, _ = self.free.popitem(last=False) # gives the first item
+            h = self.block_hash[b]
+            if h is not None:
+                # b is still holding a cached prefix, invalidate it before reusing
+                if self.hash_to_block.get(h) == b:
+                    del self.hash_to_block[h]
+                self.block_hash[b] = None
+
+            self.ref_cnt[b] = 1
+            req.block_ids.append(b)
+
+        self._register_full_blocks(req,total)
+        return True
+
+    def _register_full_blocks(self,req,num_tokens):
+        if not self.enable_caching:
+            return
+
+        self.update_hashes(req=req)
