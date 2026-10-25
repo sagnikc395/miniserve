@@ -1,0 +1,7 @@
+[project]
+name = "miniserve"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = ["huggingface-hub>=2.3.0", "torch>=2.14.1"]
