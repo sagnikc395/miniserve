@@ -1,5 +1,6 @@
 import torch
-from config import SamplingParams
+from src.miniserve.config import SamplingParams
+from dataclasses import dataclass
 
 
 class Request:
@@ -39,4 +40,16 @@ class Request:
     @property
     def output_ids(self):
         # return everything after the prompt of what we generated
-        return self.token_ids[self.prompt_len :]
+        return self.token_ids[self.prompt_len:]
+
+@dataclass
+class ScheduledRequest:
+    req: Request # live request
+    num_computed: int # kv present before the forward pass
+    num_new: int # how many tokens this forward pass will process
+
+    @property
+    def completes_prompt(self):
+        # true -> this step reaches the end of the current sequence (finish prefill or decode). Smapled next token will be real and we append it
+        # false -> chunked prefill stops mid prompt , we still run these tokens to write KV, but the last positions sampled token will be junk and just throw it away, next step continues from the prompt
+        return self.num_computed + self.num_new >= self.req.num_tokens
