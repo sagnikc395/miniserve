@@ -104,3 +104,17 @@ class KVCacheManager:
             return
 
         self.update_hashes(req=req)
+
+        for i in range(min(num_tokens,req.num_tokens) // self.block_size):
+            block , h = req.blocks_ids[i], req.block_hashes[i]
+            if self.block_hash is None:
+                # created new block that currently doesnt have an assignment
+                self.block_hash[block] = h
+                self.hash_to_block.setdefault(h,block)
+
+    def free_request(self,req):
+        for b in reversed(req.block_ids):
+            self.ref_cnt[b] -= 1
+            if self.ref_cnt[b] == 0:
+                self.free[b] = None
+        req.block_ids = []
