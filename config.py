@@ -6,37 +6,62 @@ import warnings
 
 try:
     from mps_flash_attn import flash_attention
-
     FLASH_ATTN_AVAILABLE = True
-except:
+except Exception as _ :
     FLASH_ATTN_AVAILABLE = False
 
+from .serve import resolve_device
 
 @dataclass
 class Config:
     model: str
-    dtype: torch.dtype = torch.float16  # bfloat16 inference by default
-    max_model_len: str = 4096  # max prompt + output we accept
-    attention_backend: str = "sdpa"  # other alternatives are "torch" (for reference)
-    device: str = "mps"
+    device: torch.device | str = "auto"
+    dtype: torch.dtype | None = None
 
-    # tokens per kv-cache page
-    # 0- for backend , flash-atten only supports pages that are multiples of 256, vLLM actually uses its own fork for smaller pages (more efficient if we use shorter prompts on average)
-    block_size: int = 16
-    max_num_seqs: int = 64  # in a batch, max requests, unified memory limits
+    max_model_len: int = 4096
+    attention_backend: str = "auto"  # "auto" | "flash_attn" | "torch"
+    block_size: int = 0
 
-    # token per budget per step
-    max_num_batched_tokens: int = 2048
-    gpu_memory_utilization: float = 0.80
+    max_num_seqs: int = 16
+    max_num_batched_tokens: int = 1024
+    gpu_memory_utilization: float = 0.60
+
     enable_prefix_caching: bool = True
-    use_cuda_graphs: bool = False  # set to True on cuda based devices
+    use_cuda_graphs: bool = False
     seed: int = 0
 
     def __post_init__(self):
-        if not torch.backends.mps.is_available():
-            warnings.warn("MPS device not available, falling back to CPU.")
-            self.device = "cpu"
+        self.device = resolve_device(str(self.device))
 
+        if self.dtype is None:
+            if self.device.type == "mps":
+                # A good compatibility default on Apple Silicon.
+                self.dtype = torch.float16
+            elif self.device.type == "cuda":
+                self.dtype = torch.bfloat16
+            else:
+                self.dtype = torch.float32
+
+        if self.device.type != "cuda":
+            self.attention_backend = "torch"
+            self.use_cuda_graphs = False
+        else:
+            if self.attention_backend == "auto":
+                self.attention_backend = (
+                    "flash_attn" if FLASH_ATTN_AVAILABLE else "torch"
+                )
+
+            if self.attention_backend == "flash_attn" and not FLASH_ATTN_AVAILABLE:
+                warnings.warn("FlashAttention unavailable; using torch attention")
+                self.attention_backend = "torch"
+
+            if self.attention_backend == "torch":
+                self.use_cuda_graphs = False
+
+        if self.block_size == 0:
+            self.block_size = (
+                256 if self.attention_backend == "flash_attn" else 16
+            )
 
 @dataclass
 class SamplingParams:
