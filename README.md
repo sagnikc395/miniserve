@@ -8,3 +8,8 @@ parts of the implementation:
 - engine
 - serving 
 
+### references
+
+- [Paged Attention](https://arxiv.org/abs/2309.06180)
+- [Prefix Caching](https://docs.vllm.ai/en/stable/design/prefix_caching/)
+-
