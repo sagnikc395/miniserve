@@ -71,9 +71,9 @@ def torch_ref_attention(
         mask = torch.arange(kv_len, device=q.device)[None, :] <= q_pos[:, None]
 
         # use SDPA
-        o = F.scaled_dot_product_attention(
+        sdpa = F.scaled_dot_product_attention(
             q[s:e].transpose(0, 1), k, v, attn_mask=mask, scale=scale
         )
-        out[s:e] = o.transpose(0, 1)
+        out[s:e] = sdpa.transpose(0, 1)
 
     return out

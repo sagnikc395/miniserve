@@ -12,12 +12,12 @@ AttentionFn = Callable[
 ]
 
 
-def load_flash_attn() -> AttentionFn:
-    # Imported on use, not at module scope: a missing package must not break
-    # `import miniserve.config` on a machine that never runs this backend.
-    from mps_flash_attn import flash_attention
-
-    return flash_attention
+# def load_flash_attn() -> AttentionFn:
+#     # Imported on use, not at module scope: a missing package must not break
+#     # `import miniserve.config` on a machine that never runs this backend.
+#     from mps_flash_attn import flash_attention
+#
+#     return flash_attention
 
 
 def load_torch_ref() -> AttentionFn:
@@ -31,7 +31,7 @@ def load_paged_sdpa() -> AttentionFn:
 
 
 ATTENTION_BACKENDS: dict[str, Callable[[], AttentionFn]] = {
-    "flash_attn": load_flash_attn,
+    # "flash_attn": load_flash_attn,
     "torch": load_torch_ref,
     "sdpa": load_paged_sdpa,
 }
@@ -45,9 +45,9 @@ def get_attention_fn(name: str) -> AttentionFn:
     return ATTENTION_BACKENDS[name]()
 
 
-def flash_attn_available() -> bool:
-    try:
-        load_flash_attn()
-    except ImportError:
-        return False
-    return True
+# def flash_attn_available() -> bool:
+#     try:
+#         load_flash_attn()
+#     except ImportError:
+#         return False
+#     return True

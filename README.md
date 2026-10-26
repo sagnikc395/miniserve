@@ -5,12 +5,7 @@ This uses a simplified implementation of
 - Paged KV Cached with prefix caching
 - Continuous batching with chunked prefill, 
 - SDPA(Flash Attention is CUDA dependent) , 
-- static shapes + preallocation + Metal fusion , 
-- and using FastAPI to setup a OpenAI-compatible HTTP Server.(to query and setup the whole flow of chatting with a LLM).
 
-
-## checkout time
-https://www.youtube.com/watch?v=qIVzHM2FfFY&t=258s ; 1:18:50
 
 ### Architecture
 ```mermaid
@@ -136,34 +131,6 @@ flowchart TB
     stop -->|"no"| nextstep(["next step"])
     drop --> nextstep
     fin --> nextstep
-```
-
-### Packages
-
-```mermaid
-flowchart LR
-    cli["cli<br/>serve, generate, bench"]
-    api["api<br/>app, routers, schemas, deps, settings"]
-    engine["engine<br/>Engine, AsyncEngine, Detokenizer"]
-    core["core<br/>Sequence, KVCacheManager, Scheduler"]
-    runner["runner<br/>ModelRunner, memory, sampler"]
-    model["model<br/>layers, transformer, loader"]
-    attention["attention<br/>paged_sdpa, torch_ref, metadata,<br/>forward_context"]
-    platform["platform<br/>MPS / CPU helpers"]
-    tests["tests/ (outside src)<br/>unit, model, api"]
-
-    cli --> api
-    cli --> engine
-    api --> engine
-    engine --> core
-    engine --> runner
-    runner --> model
-    runner --> attention
-    runner --> platform
-    model --> attention
-    tests -.-> api
-    tests -.-> engine
-    tests -.-> core
 ```
 
 ### References
