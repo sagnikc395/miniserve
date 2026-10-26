@@ -75,7 +75,92 @@ class Scheduler:
         return bool(self.waiting or self.running)
 
     def schedule(self) -> list[ScheduledRequest]:
-        pass
+
+        budget = self.cfg.max_num_batched_tokens
+
+        # for each request id, how many tokens will we run this step ?
+        plan = {}
+
+        # if we evict anyone, dont admit anyone new work
+        preempted = False
+
+        # running requests
+        i = 0
+
+        while i < len(self.running) and budget > 0:
+            # what request
+            req = self.running[i]
+
+            # actively decoding , new tokens to generate
+            n = min(req.num_tokens - req.num_computed_tokens, budget)
+
+            while not self.kv.allocate(req, n):
+                # as long as it doesnt fit in our kv cache, we have an issue and we need to evict things
+                # KV RUNNING OUT OF SPACE WHEN a comes, so c gets evicted
+                victim = self.running.pop()
+                self.kv.free_request(victim)
+                victim.num_computed_tokens = 0
+                # first thing on the waiting list
+                self.waiting.appendleft(victim)
+                # all the tokens that we have gone back
+                budget += plan.pop(victim.request_id, 0)
+                # something has been skipped
+                preempted = True
+
+                if victim is req:
+                    # grown past the boundaries and kv cache
+                    break
+
+            if req not in self.running:
+                # the request is done
+                break
+
+            # this request is responsible for these many tokens
+            plan[req.request_id] = n
+
+            budget -= n
+            i += 1
+
+        # currently waiting request
+        while (not preempted and self.waiting and budget > 0 and len(self.running) < self.cfg.max_num_seqs):
+            # for something in the waiting list and some budget remaining
+            req = self.waiting[0]
+            cached = self.kv.find_cached_prefix(req)
+            # how many tokens that I have - how many can i borrow from precomputed
+            n = min(req.num_tokens - len(cached) * self.cfg.block_size, budget)
+
+            if not self.kv.allocate(req,n,cached):
+                # couldnt fit this particular request, this budget based on our total token count
+                break
+
+            self.waiting.popleft()
+
+            req.num_computed_tokens = len(cached) * self.cfg.block_size
+            # if some request can get evicted we can recompute and keep track of what the best cache hit we had
+            req.num_cached_tokens = max(req.num_cached_tokens, req.num_computed_tokens)
+
+            self.running.append(req)
+
+            plan[req.request_id] = n
+            # decrease budget by n tokens
+            budget -= n
+
+        # emit the batch in running order
+        batch = []
+        for req in self.running:
+            if req.request_id in plan:
+                batch.append(
+                    ScheduledRequest(
+                        req,req.num_computed_tokens,plan[req.request_id]
+                    )
+                )
+
+                # advance optimistically
+                req.num_computed_tokens += plan[req.request_id]
+
+        return batch
+
+
 
     def finish(self, req: Request, reason: str) -> None:
         req.finished, req.finish_reason = True, reason
