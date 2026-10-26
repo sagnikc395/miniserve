@@ -9,6 +9,9 @@ This uses a simplified implementation of
 - and using FastAPI to setup a OpenAI-compatible HTTP Server.(to query and setup the whole flow of chatting with a LLM).
 
 
+## checkout time
+https://www.youtube.com/watch?v=qIVzHM2FfFY&t=258s ; 1:18:50
+
 ### Architecture
 ```mermaid
 flowchart LR
