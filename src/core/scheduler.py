@@ -1,6 +1,8 @@
 import torch
-from src.miniserve.config import SamplingParams
+from src.core.kv_cache import KVCacheManager
+from src.miniserve.config import SamplingParams, Config
 from dataclasses import dataclass
+from collections import deque
 
 
 class Request:
@@ -40,16 +42,45 @@ class Request:
     @property
     def output_ids(self):
         # return everything after the prompt of what we generated
-        return self.token_ids[self.prompt_len:]
+        return self.token_ids[self.prompt_len :]
+
 
 @dataclass
 class ScheduledRequest:
-    req: Request # live request
-    num_computed: int # kv present before the forward pass
-    num_new: int # how many tokens this forward pass will process
+    req: Request  # live request
+    num_computed: int  # kv present before the forward pass
+    num_new: int  # how many tokens this forward pass will process
 
     @property
     def completes_prompt(self):
         # true -> this step reaches the end of the current sequence (finish prefill or decode). Smapled next token will be real and we append it
         # false -> chunked prefill stops mid prompt , we still run these tokens to write KV, but the last positions sampled token will be junk and just throw it away, next step continues from the prompt
         return self.num_computed + self.num_new >= self.req.num_tokens
+
+
+class Scheduler:
+    # called once per step, which requests run, and how many tokens each
+    # 1. Running requests fo first.
+    # 2. Then admit waitiing requests while there is token budget
+    def __init__(self, cfg: Config, kv: KVCacheManager):
+        self.cfg = cfg
+        self.kv = kv
+        self.waiting: deque[Request] = deque()  # FIFO of not yet admitted requests
+        self.running: list[Request] = []  # currently holding KV pages
+
+    def add(self, req: Request):
+        self.waiting.append(req)
+
+    def has_work(self) -> bool:
+        return bool(self.waiting or self.running)
+
+    def schedule(self) -> list[ScheduledRequest]:
+        pass
+
+    def finish(self, req: Request, reason: str) -> None:
+        req.finished, req.finish_reason = True, reason
+        if req in self.running:
+            self.running.remove(req)
+        elif req in self.waiting:
+            self.waiting.remove(req)
+        self.kv.free_request(req)
