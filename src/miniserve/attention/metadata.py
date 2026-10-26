@@ -11,7 +11,7 @@ class AttnMetadata:
     slot_mapping: torch.Tensor
 
     # prefix sums of this step query lengths. request i owns q[qsl[i]:qsl[i+1]]
-    query_start_loc: torch.Tensor # [B+1]
+    query_start_loc: torch.Tensor  # [B+1]
 
     # prefix sums of full context lengths (kv_len)
     cu_seqlens_k: torch.Tensor

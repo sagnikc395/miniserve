@@ -2,7 +2,7 @@ from torch import nn
 import torch
 
 
-class RMSProp(nn.Module):
+class RMSNorm(nn.Module):
     def __init__(self, dim, eps):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(dim))

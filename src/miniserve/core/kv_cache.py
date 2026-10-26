@@ -1,5 +1,6 @@
-from typing_extensions import OrderedDict
-import math
+from collections import OrderedDict
+
+from miniserve.core.sequence import Request
 
 
 class KVCacheManager:
@@ -27,7 +28,7 @@ class KVCacheManager:
         # keep track of how many available blocks
         return len(self.free)
 
-    def update_hashes(self, req):
+    def update_hashes(self, req: Request):
         bs = self.block_size
         while len(req.block_hashes) < (req.num_tokens // bs):
             # only hash a full block
@@ -37,7 +38,7 @@ class KVCacheManager:
                 hash((parent, tuple(req.token_ids[i * bs : (i + 1) * bs])))
             )
 
-    def find_cached_prefix(self, req):
+    def find_cached_prefix(self, req: Request):
         # if we are not doing prefix caching, this wont work
         if not self.enable_caching:
             return []
@@ -59,17 +60,18 @@ class KVCacheManager:
 
         return hits
 
-    def allocate(self, req, num_new_tokens, cached):
+    def allocate(self, req: Request, num_new_tokens: int, cached: list[int]) -> bool:
         # can assign our blocks to the page table
         # num_new_tokens = 1 (generally per decoding step)
         total = req.num_computed_tokens + len(cached) * self.block_size + num_new_tokens
 
-        total_needed_blocks = math.ceil(total // self.block_size)
+        # ceil: the partial last block still needs a page of its own
+        total_needed_blocks = -(-total // self.block_size)
 
         need = total_needed_blocks - len(req.block_ids) - len(cached)
         reclaim = sum(1 for b in cached if self.ref_cnt[b] == 0)
 
-        if need + reclaim > self.num_free:
+        if max(need, 0) + reclaim > self.num_free:
             # not enough spots left
             return False
 
@@ -84,8 +86,8 @@ class KVCacheManager:
             req.block_ids.append(block_idx)
 
         # allocated new blocks
-        for _ in range(max(need,0)):
-            b, _ = self.free.popitem(last=False) # gives the first item
+        for _ in range(max(need, 0)):
+            b, _ = self.free.popitem(last=False)  # gives the first item
             h = self.block_hash[b]
             if h is not None:
                 # b is still holding a cached prefix, invalidate it before reusing
@@ -96,23 +98,23 @@ class KVCacheManager:
             self.ref_cnt[b] = 1
             req.block_ids.append(b)
 
-        self._register_full_blocks(req,total)
+        self.register_full_blocks(req, total)
         return True
 
-    def _register_full_blocks(self,req,num_tokens):
+    def register_full_blocks(self, req: Request, num_tokens: int):
         if not self.enable_caching:
             return
 
         self.update_hashes(req=req)
 
-        for i in range(min(num_tokens,req.num_tokens) // self.block_size):
-            block , h = req.blocks_ids[i], req.block_hashes[i]
-            if self.block_hash is None:
+        for i in range(min(num_tokens, req.num_tokens) // self.block_size):
+            block, h = req.block_ids[i], req.block_hashes[i]
+            if self.block_hash[block] is None:
                 # created new block that currently doesnt have an assignment
                 self.block_hash[block] = h
-                self.hash_to_block.setdefault(h,block)
+                self.hash_to_block.setdefault(h, block)
 
-    def free_request(self,req):
+    def free_request(self, req: Request):
         for b in reversed(req.block_ids):
             self.ref_cnt[b] -= 1
             if self.ref_cnt[b] == 0:

@@ -1,38 +1,32 @@
+import warnings
 from dataclasses import dataclass
+from typing import Literal
 
 # some basic configurations of things
 import torch
-import warnings
 
-from src.attention.metadata import AttnMetadata
-from src.model.attention import torch_ref_attention
-
-try:
-    from mps_flash_attn import flash_attention
-
-    FLASH_ATTN_AVAILABLE = True
-except Exception as _:
-    FLASH_ATTN_AVAILABLE = False
-
-from .platform import resolve_device
+from miniserve.attention.backends import flash_attn_available
+from miniserve.platform import resolve_device
 
 
 @dataclass
-class Config:
+class EngineConfig:
     model: str
     device: torch.device | str = "auto"
     dtype: torch.dtype | None = None
 
     max_model_len: int = 4096
-    attention_backend: str = "auto"  # "auto" | "flash_attn" | "torch"
-    block_size: int = 0
+    attention_backend: Literal["auto", "sdpa", "torch", "flash_attn"] = "auto"
+    kv_layout: Literal["dense_slots", "paged"] = "paged"
+    decode_backend: Literal["eager", "compiled", "metal"] = "eager"
+    block_size: int = 16
 
     max_num_seqs: int = 16
     max_num_batched_tokens: int = 1024
     gpu_memory_utilization: float = 0.60
 
     enable_prefix_caching: bool = True
-    use_cuda_graphs: bool = False
+    use_cuda_graphs: bool = False  # CUDA only
     seed: int = 0
 
     def __post_init__(self):
@@ -53,34 +47,15 @@ class Config:
         else:
             if self.attention_backend == "auto":
                 self.attention_backend = (
-                    "flash_attn" if FLASH_ATTN_AVAILABLE else "torch"
+                    "flash_attn" if flash_attn_available() else "torch"
                 )
 
-            if self.attention_backend == "flash_attn" and not FLASH_ATTN_AVAILABLE:
+            if self.attention_backend == "flash_attn" and not flash_attn_available():
                 warnings.warn("FlashAttention unavailable; using torch attention")
                 self.attention_backend = "torch"
 
             if self.attention_backend == "torch":
                 self.use_cuda_graphs = False
-
-        if self.block_size == 0:
-            self.block_size = 256 if self.attention_backend == "flash_attn" else 16
-
-
-@dataclass
-class SamplingParams:
-    temperature: float = 1.0  # 0 -> greedy decode
-    top_p: float = 1.0
-    top_k: int = -1  # -1 means off
-    max_tokens: int = 64  # max tokens to generate
-    ignore_eos: bool = False  # as we normally stop generating on eos token
-
-    # testing
-    forced_token_ids: list[int] | None = None  # teacher forcing to compare log probs
-    return_logprobs: bool = False
-
-
-### SOME GLOBAL VARIABLES FOR SELECTING ATTENTION
-ATTENTION_BACKENDS = {"flash_attn": flash_attention, "torch": torch_ref_attention}
-ATTN_META: AttnMetadata | None = None
-ATTN_FN = flash_attention
+            else:
+                # the paged kernel reads much larger pages than the reference path
+                self.block_size = 256
