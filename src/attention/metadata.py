@@ -6,26 +6,30 @@ import torch
 class AttnMetadata:
     # batch descriptor for one engine step, shared by every attention layer.
 
-    # flat cache addresses for each of the T new tokens.
+    # flat cache addresses for each of the T new tokens. (T-> Packed sequence length, eg: 6 tokens packed together)
     # slot = block_id * block_size + (t % block_size)
     slot_mapping: torch.Tensor
 
     # prefix sums of this step query lengths. request i owns q[qsl[i]:qsl[i+1]]
-    query_start_loc: torch.Tensor
+    query_start_loc: torch.Tensor # [B+1]
 
     # prefix sums of full context lengths (kv_len)
     cu_seqlens_k: torch.Tensor
 
-    # page table , Row i is req.block_ids padded to max_blocks
+    # page table , Row i is req.block_ids padded to max_blocks , block / max_blocks
+    # for every single sample, what blocks is it currently referencing
+    # pad the shorter ones to the longer ones
+    # padded to the max blocks
     block_table: torch.Tensor
 
     # live rows of block_table / entries in the cu_seqlens arrays
+    # batch size
     num_seqs: int
 
-    # max this step
+    # max query input
     max_query_len: int
 
-    # max(kv_len_i) this step
+    # max(kv_len_i) this step; including the kvs
     max_seq_len: int
 
     # host copies so torch_ref can index in python without a GPU sync per request

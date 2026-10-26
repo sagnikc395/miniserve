@@ -160,8 +160,6 @@ class Scheduler:
 
         return batch
 
-
-
     def finish(self, req: Request, reason: str) -> None:
         req.finished, req.finish_reason = True, reason
         if req in self.running:
