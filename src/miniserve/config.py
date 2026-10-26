@@ -4,6 +4,9 @@ from dataclasses import dataclass
 import torch
 import warnings
 
+from src.attention.metadata import AttnMetadata
+from src.model.attention import torch_ref_attention
+
 try:
     from mps_flash_attn import flash_attention
 
@@ -75,3 +78,9 @@ class SamplingParams:
     # testing
     forced_token_ids: list[int] | None = None  # teacher forcing to compare log probs
     return_logprobs: bool = False
+
+
+### SOME GLOBAL VARIABLES FOR SELECTING ATTENTION
+ATTENTION_BACKENDS = {"flash_attn": flash_attention, "torch": torch_ref_attention}
+ATTN_META: AttnMetadata | None = None
+ATTN_FN = flash_attention
