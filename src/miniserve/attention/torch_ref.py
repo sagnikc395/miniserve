@@ -32,6 +32,7 @@ def torch_ref_attention(
 
     # for each sequence that has been packed
     for i in range(meta.num_seqs):
+        # ideally vectorized the whole thing, by creating a block mask
         s, e, kv_len = qsl[i], qsl[i + 1], seq_lens[i]
 
         # tokens processed for i this step
