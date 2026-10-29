@@ -1,7 +1,5 @@
-from turtle import position
-
 import torch
-from miniserve.model.layers import RMSNorm , DecoderLayer
+from miniserve.model.layers import RMSNorm, DecoderLayer
 from torch import nn
 
 
@@ -13,14 +11,14 @@ class Model(nn.Module):
         self.embed_tokens = nn.Embedding(cfg.vocab_size,cfg.hidden_size)
 
         self.layers = nn.ModuleList(DecoderLayer(cfg,i) for i in range(cfg.num_hidden_layers))
-        self.norm = RMSNorm(cfg.hidden_size,cfg.res_norm_eps)
+        self.norm = RMSNorm(cfg.hidden_size,cfg.rms_norm_eps)
         self.tie = getattr(cfg,"tie_word_embeddings",False)
 
         if not self.tie:
             self.lm_head = nn.Linear(cfg.hidden_size,cfg.vocab_size,bias=False)
 
         # RoPE table , indexed by absolute position
-        rope = getattr(cfg,"rope_parameters",None) or getattr(cfg,"rope_scaling",None)
+        rope = getattr(cfg,"rope_parameters",None) or getattr(cfg,"rope_scaling",None) or {}
 
         theta = getattr(cfg, "rope_theta", None) or rope.get("rope_theta", 10000.0)
         D = getattr(cfg, "head_dim", None) or cfg.hidden_size // cfg.num_attention_heads
@@ -38,4 +36,4 @@ class Model(nn.Module):
 
     def logits(self,hidden):
         w = self.embed_tokens.weight if self.tie else self.lm_head.weight
-        return hidden @ w.t
+        return hidden @ w.t()

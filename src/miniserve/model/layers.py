@@ -21,3 +21,7 @@ def rotary(x, cos, sin):
     x1, x2 = x.float().chunk(2, dim=-1)
     cos, sin = cos[:, None], sin[:, None]
     return torch.cat([x1 * cos - x2 * sin, x2 * cos + x1 * sin], -1).to(x.dtype)
+
+
+class DecoderLayer(nn.Module):
+    pass
