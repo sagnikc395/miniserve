@@ -29,7 +29,7 @@ class Attention(nn.Module):
 
         self.layer_idx = layer_idx
         self.attn_fn = attn_fn
-        self.kv_cache: torch.Tensor | None = None
+        self.kv_cache: torch.Tensor | None = None # [2, num_blocks, block_size, Hkv, D]
 
     def forward(self, x, cos, sin):
         T = x.shape[0]  # x is passed in as packed
@@ -46,6 +46,9 @@ class Attention(nn.Module):
 
         # write this current step's new K/V into the page pool before attention
 
+        assert self.kv_cache is not None, (
+            f"layer {self.layer_idx}: kv_cache not allocated before paged attention"
+        )
         k_cache, v_cache = self.kv_cache[0], self.kv_cache[1]
         n = meta.slot_mapping.shape[0]
 
