@@ -50,12 +50,15 @@ class Attention(nn.Module):
             f"layer {self.layer_idx}: kv_cache not allocated before paged attention"
         )
         k_cache, v_cache = self.kv_cache[0], self.kv_cache[1]
+        # how many mapping we are gonna have
         n = meta.slot_mapping.shape[0]
 
+        # how we are going to flatten the dimensions, i.e the total slots that we have
         k_cache.view(-1, self.Hkv, self.D).index_copy_(0, meta.slot_mapping, k[:n])
         v_cache.view(-1, self.Hkv, self.D).index_copy_(0, meta.slot_mapping, v[:n])
 
         # attend over each request's whole context through its block table
         out = self.attn_fn(q[:n], k_cache, v_cache, meta, self.D**-0.5)
 
+        # project it out
         return self.o_proj(out.reshape(n, -1))
