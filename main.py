@@ -25,15 +25,15 @@ def bench():
     raise click.ClickException("bench is not implemented yet")
 
 
-@main.command('attn-demo')
+@main.command("attn-demo")
 def attn_demo():
     attention_demo.demo()
 
 
-@main.command('kv-demo')
+@main.command("kv-demo")
 def kv_demo_cmd():
     kv_demo.demo()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

@@ -45,14 +45,14 @@ class EngineConfig:
             self.attention_backend = "torch"
             self.use_cuda_graphs = False
         else:
-#             if self.attention_backend == "auto":
-#                 self.attention_backend = (
-#                     "flash_attn" if flash_attn_available() else "torch"
-#                 )
-#
-#             if self.attention_backend == "flash_attn" and not flash_attn_available():
-#                 warnings.warn("FlashAttention unavailable; using torch attention")
-#                 self.attention_backend = "torch"
+            #             if self.attention_backend == "auto":
+            #                 self.attention_backend = (
+            #                     "flash_attn" if flash_attn_available() else "torch"
+            #                 )
+            #
+            #             if self.attention_backend == "flash_attn" and not flash_attn_available():
+            #                 warnings.warn("FlashAttention unavailable; using torch attention")
+            #                 self.attention_backend = "torch"
 
             if self.attention_backend == "torch":
                 self.use_cuda_graphs = False

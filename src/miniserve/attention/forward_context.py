@@ -3,7 +3,7 @@ from contextvars import ContextVar
 
 from miniserve.attention.metadata import AttnMetadata
 
-# Per-step batch descriptor: the runner sets it once per forward pass and every
+# per-step batch descriptor: the runner sets it once per forward pass and every
 # attention layer reads it back. A plain module global will not do, because
 # `from miniserve.config import ATTN_META` copies the binding at import time and
 # the layer then never sees an update.

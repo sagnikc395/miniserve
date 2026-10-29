@@ -57,7 +57,9 @@ def demo() -> None:
         assert kv.allocate(a, 1, [])
         a.num_computed_tokens = a.num_tokens
         print(f"  appended {tok} -> page table {a.block_ids}")
-    print("  the 13th token crossed a page boundary, so a 4th page was claimed on demand")
+    print(
+        "  the 13th token crossed a page boundary, so a 4th page was claimed on demand"
+    )
     show_pool(kv)
 
     banner("4. Request 'b' arrives sharing the first 8 tokens of 'a'")
@@ -75,7 +77,9 @@ def demo() -> None:
 
     banner("5. 'a' finishes while 'b' still reads its pages")
     kv.free_request(a)
-    print(f"  page {shared} survives: ref_cnt = {kv.ref_cnt[shared]}, free = {list(kv.free)}")
+    print(
+        f"  page {shared} survives: ref_cnt = {kv.ref_cnt[shared]}, free = {list(kv.free)}"
+    )
     print(f"  'a' tail pages went back to the LRU queue but keep their hashes,")
     print("  so a third copy of the same prompt would still hit them")
 

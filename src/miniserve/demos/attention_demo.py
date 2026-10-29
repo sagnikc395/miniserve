@@ -44,11 +44,15 @@ class Pool:
             pages.append(self.next_page)
             self.next_page += 1
         return torch.tensor(
-            [pages[p // BLOCK_SIZE] * BLOCK_SIZE + p % BLOCK_SIZE
-             for p in range(start, start + count)]
+            [
+                pages[p // BLOCK_SIZE] * BLOCK_SIZE + p % BLOCK_SIZE
+                for p in range(start, start + count)
+            ]
         )
 
-    def write(self, rid: str, start: int, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    def write(
+        self, rid: str, start: int, k: torch.Tensor, v: torch.Tensor
+    ) -> torch.Tensor:
         """Scatter new K/V into the pool, exactly as the attention layer does."""
         slot_mapping = self.slots(rid, start, k.shape[0])
         self.k_cache.view(-1, self.Hkv, D).index_copy_(0, slot_mapping, k)
@@ -65,7 +69,9 @@ class Pool:
     def block_table(self, rids: list[str]) -> torch.Tensor:
         """Page tables as one padded tensor, one row per request."""
         width = max(len(self.block_ids[r]) for r in rids)
-        rows = [self.block_ids[r] + [0] * (width - len(self.block_ids[r])) for r in rids]
+        rows = [
+            self.block_ids[r] + [0] * (width - len(self.block_ids[r])) for r in rids
+        ]
         return torch.tensor(rows, dtype=torch.int32)
 
 
@@ -87,9 +93,7 @@ def metadata(pool: Pool, steps: list[tuple[str, int, int]]) -> AttnMetadata:
         cu_k.append(cu_k[-1] + kv)
 
     # slot_mapping covers only the new tokens, in the same packed order as q
-    slot_mapping = torch.cat(
-        [pool.slots(rid, kv - q, q) for rid, q, kv in steps]
-    )
+    slot_mapping = torch.cat([pool.slots(rid, kv - q, q) for rid, q, kv in steps])
 
     return AttnMetadata(
         slot_mapping=slot_mapping,
@@ -155,7 +159,9 @@ def run_step(pool: Pool, steps: list[tuple[str, int, int]]) -> torch.Tensor:
         qs.append(q)
 
     meta = metadata(pool, steps)
-    print(f"  packed q_lens {[q for _, q, _ in steps]}, kv_lens {[kv for _, _, kv in steps]}")
+    print(
+        f"  packed q_lens {[q for _, q, _ in steps]}, kv_lens {[kv for _, _, kv in steps]}"
+    )
     print(f"  slot_mapping {meta.slot_mapping.tolist()}")
     print(f"  block_table\n{meta.block_table}")
     return torch_ref_attention(torch.cat(qs), pool.k_cache, pool.v_cache, meta, D**-0.5)
@@ -199,7 +205,9 @@ def demo() -> None:
     pool = Pool(num_heads=4, num_kv_heads=2)
     steps = [("g", 7, 7)]
     out = run_step(pool, steps)
-    print(f"  pages hold {pool.Hkv} KV heads; each is shared by {pool.H // pool.Hkv} query heads")
+    print(
+        f"  pages hold {pool.Hkv} KV heads; each is shared by {pool.H // pool.Hkv} query heads"
+    )
     check("gqa prefill", pool, steps, out)
 
     steps = [("g", 1, 8)]
