@@ -1,22 +1,38 @@
 ## main cli entrypoint for the inference and running everything
 
-import argparse
+import click
 
 from miniserve.demos import attention_demo, kv_demo
 
 
+@click.group()
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('command',choices=['serve','generate','bench','attn-demo','kv-demo'])
+    pass
 
-    a = ap.parse_args()
 
-    if a.command == "kv-demo":
-        kv_demo.demo()
-        return
-    if a.command == "attn-demo":
-        attention_demo.demo()
-        return
+@main.command()
+def serve():
+    raise click.ClickException("serve is not implemented yet")
+
+
+@main.command()
+def generate():
+    raise click.ClickException("generate is not implemented yet")
+
+
+@main.command()
+def bench():
+    raise click.ClickException("bench is not implemented yet")
+
+
+@main.command('attn-demo')
+def attn_demo():
+    attention_demo.demo()
+
+
+@main.command('kv-demo')
+def kv_demo_cmd():
+    kv_demo.demo()
 
 
 if __name__ == '__main__':
