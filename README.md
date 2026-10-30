@@ -6,6 +6,8 @@ This uses a simplified implementation of
 - Continuous batching with chunked prefill, 
 - SDPA(Flash Attention is CUDA dependent) , 
 
+start from 1:43:46 
+
 
 ### Architecture
 ```mermaid
