@@ -19,7 +19,7 @@ def sample(logits, params: list[SamplingParams], token_ids):
 
     V = logits.shape[-1]
 
-    top_k = torch.tensor([p.top_k if p.tok_k > 0 else v for p in params],device=dev)
+    top_k = torch.tensor([p.top_k if p.top_k > 0 else v for p in params],device=dev)
     top_p = torch.tensor([p.top_p for p in params],device=dev)
 
     # sort logits by most likely to least likely
