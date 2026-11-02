@@ -2,7 +2,9 @@ from miniserve.attention.backends import ATTENTION_BACKENDS
 from miniserve.attention.forward_context import set_forward_context
 from miniserve.model.loader import load_model
 from miniserve.platform import device_memory
+from mpmath.libmp.libelefun import bs_chudnovsky
 import torch
+import numpy as np
 
 class ModelRunner:
     # turns the schedulers decisions into GPU tensors
@@ -152,3 +154,56 @@ class ModelRunner:
 
         self.num_blocks = num_blocks
         return num_blocks
+
+    def _prepare(self,batch,pad_to,forward_graph=False):
+        # all the metadata that we need to write
+
+        bs = self.cfg.block_size
+
+        #packed streams we will copy onto the GPU buffers
+        ids, pos, slots, logit_rows = [],[],[],[]
+        qsl,seq_lens = [0],[] # qsl starts at 0 , we append the rest
+
+        # page table for real + dummy rows, max block need possibly for a single sequence
+        bt = np.zeros((max(len(batch),pad_to),self.max_blocks_per_seq),dtype=np.int32)
+
+        for i, s in enumerate(batch):
+            start, n = s.num_computed, s.num_new
+            p = np.arange(start,start+n)
+            blocks = np.asarray(s.req_block_ids)
+
+            # now store the metadata information back to the vars that we defined
+
+            #1.pack together each batch into a single stream
+            ids.extend(s.req.token_ids[start:start+n]) # packed input ids
+            #position embeds restart from 0 fro every sample
+            pos.extend(p.tolist()) # RoPE/ Causal positions
+
+            # slot = page * bs + offset , destination of index_copy_ for each new token
+            slots.extend((blocks[p//bs] * bs + p % bs).tolist())
+
+            # request i owns q[qsl[i]:qsl[i+1]]
+            qsl.append(qsl[-1]+n)
+            # kv_len after this step's write
+            seq_lens.append(start+n)
+            # page-table row
+            bt[i,:len(blocks)] = blocks
+            #last packed row -> grab the actual rows that we will grab to project the softmax
+            logit_rows.append(qsl[-1] -1)
+
+        for _ in range(len(batch),pad_to):
+            ids.append(0)
+            pos.append(0)
+            slots.append(0)
+            qsl.append(qsl[-1]+1)
+            seq_lens.append(1)
+
+        T,B = len(ids),len(seq_lens)
+        # now need to write this to persistent buffers
+        # fixed addresses for CUDA graphs
+        self.input_ids[:T].copy_(torch.tensor(ids))
+        self.positions[:T].copy_(torch.tensor(pos))
+        self.slot_mapping[:T].copy_(torch.tensor(slots))
+        self.query_start_loc[:B+1].copy_(torch.tensor(qsl))
+        self.cu_seqlens_k[:B+1].copy_(torch.tensor([0] + np.cumsum(seq_lens).tolist()))
+        self.block_table[:B].copy_(torch.from_numpy(bt))
