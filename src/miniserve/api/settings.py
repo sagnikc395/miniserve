@@ -35,9 +35,7 @@ class Settings:
             host=env.get("MINISERVE_HOST", cls.host),
             port=int(env.get("MINISERVE_PORT", cls.port)),
             device=env.get("MINISERVE_DEVICE", cls.device),
-            max_model_len=int(
-                env.get("MINISERVE_MAX_MODEL_LEN", cls.max_model_len)
-            ),
+            max_model_len=int(env.get("MINISERVE_MAX_MODEL_LEN", cls.max_model_len)),
             max_num_seqs=int(env.get("MINISERVE_MAX_NUM_SEQS", cls.max_num_seqs)),
             max_num_batched_tokens=int(
                 env.get(

@@ -34,9 +34,7 @@ def _batched_attention(q, k_cache, v_cache, meta, scale, q_len):
     ks, vs = [], []
     for i in range(batch):
         kv_len = seq_lens[i]
-        k, v = _gather_prefix(
-            k_cache, v_cache, meta.block_table[i], kv_len, block_size
-        )
+        k, v = _gather_prefix(k_cache, v_cache, meta.block_table[i], kv_len, block_size)
         if kv_len < max_kv:
             pad = max_kv - kv_len
             k = F.pad(k, (0, 0, 0, 0, 0, pad))
@@ -63,9 +61,10 @@ def _batched_attention(q, k_cache, v_cache, meta, scale, q_len):
         )
         allowed = key_pos[None, None, :] <= q_pos[:, :, None]
         # drop the padding of shorter sequences
-        allowed &= key_pos[None, None, :] < torch.tensor(
-            seq_lens, device=device
-        )[:, None, None]
+        allowed &= (
+            key_pos[None, None, :]
+            < torch.tensor(seq_lens, device=device)[:, None, None]
+        )
         mask = allowed[:, None, :, :]  # [B, 1, Q, max_kv]
 
     out = F.scaled_dot_product_attention(
@@ -105,9 +104,7 @@ def torch_ref_attention(
         s, e, kv_len = qsl[i], qsl[i + 1], seq_lens[i]
         q_len = e - s
 
-        k, v = _gather_prefix(
-            k_cache, v_cache, meta.block_table[i], kv_len, bs
-        )
+        k, v = _gather_prefix(k_cache, v_cache, meta.block_table[i], kv_len, bs)
 
         # SDPA wants [H, kv_len, D]
         k = k.transpose(0, 1)
@@ -148,9 +145,7 @@ def paged_sdpa_attention() -> AttentionFn:
         qsl = meta.query_start_loc_cpu
         q_lens = [qsl[i + 1] - qsl[i] for i in range(meta.num_seqs)]
         if q_lens and len(set(q_lens)) == 1:
-            return _batched_attention(
-                q, k_cache, v_cache, meta, scale, q_lens[0]
-            )
+            return _batched_attention(q, k_cache, v_cache, meta, scale, q_lens[0])
         return torch_ref_attention(q, k_cache, v_cache, meta, scale)
 
     return _attention

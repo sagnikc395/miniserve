@@ -60,9 +60,7 @@ def _bench_engine(cfg: EngineConfig, num_prompts: int, max_tokens: int) -> dict:
         "wall_s": elapsed,
         "req_per_s": len(prompts) / elapsed if elapsed else 0.0,
         "output_tok_per_s": generated / elapsed if elapsed else 0.0,
-        "total_tok_per_s": (prompt_tokens + generated) / elapsed
-        if elapsed
-        else 0.0,
+        "total_tok_per_s": (prompt_tokens + generated) / elapsed if elapsed else 0.0,
         "p50_latency_s": _percentile(latencies, 50),
         "p90_latency_s": _percentile(latencies, 90),
         "p50_ttft_s": _percentile(ttfts, 50),

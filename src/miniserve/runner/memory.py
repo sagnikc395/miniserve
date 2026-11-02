@@ -19,14 +19,7 @@ def kv_cache_bytes_per_block(
     dtype,
 ) -> int:
     """Bytes for one page of every layer: K and V, all KV heads."""
-    return (
-        2
-        * num_layers
-        * block_size
-        * num_kv_heads
-        * head_dim
-        * element_size(dtype)
-    )
+    return 2 * num_layers * block_size * num_kv_heads * head_dim * element_size(dtype)
 
 
 def kv_cache_budget(

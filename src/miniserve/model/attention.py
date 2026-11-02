@@ -23,9 +23,7 @@ class Attention(nn.Module):
         # q, k and v live in one projection so the forward pass has a single
         # matmul. The loader writes each checkpoint projection into its slice.
         self.qkv_sizes = [self.H * self.D, self.Hkv * self.D, self.Hkv * self.D]
-        self.qkv_proj = nn.Linear(
-            cfg.hidden_size, sum(self.qkv_sizes), bias=qkv_bias
-        )
+        self.qkv_proj = nn.Linear(cfg.hidden_size, sum(self.qkv_sizes), bias=qkv_bias)
         if qkv_bias:
             # some checkpoints only carry q/v bias; the unused k slice must not
             # stay at the random init value

@@ -48,9 +48,7 @@ async def validation_error_handler(
 ) -> JSONResponse:
     return JSONResponse(
         status_code=400,
-        content=error_body(
-            str(exc.errors()[:1]), type="invalid_request_error"
-        ),
+        content=error_body(str(exc.errors()[:1]), type="invalid_request_error"),
     )
 
 

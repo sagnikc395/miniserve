@@ -58,7 +58,5 @@ def build_prompts(num_prompts: int, tokenizer=None) -> list[str]:
                     )
                 )
             except Exception:
-                prompts.append(
-                    f"{SYSTEM_PROMPT}\n\nUser: {instruction}\nAssistant:"
-                )
+                prompts.append(f"{SYSTEM_PROMPT}\n\nUser: {instruction}\nAssistant:")
     return prompts

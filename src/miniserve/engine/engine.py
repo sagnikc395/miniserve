@@ -90,9 +90,7 @@ class Engine:
             self.runner.capture_cuda_graphs()
 
         # setup the kv cache and the scheduler
-        self.kv = KVCacheManager(
-            num_blocks, cfg.block_size, cfg.enable_prefix_caching
-        )
+        self.kv = KVCacheManager(num_blocks, cfg.block_size, cfg.enable_prefix_caching)
         self.scheduler = Scheduler(cfg, self.kv)
 
         # setup storage for the rest
@@ -113,11 +111,7 @@ class Engine:
         return self.cfg.max_model_len
 
     def encode(self, prompt) -> list[int]:
-        ids = (
-            self.tokenizer.encode(prompt)
-            if isinstance(prompt, str)
-            else list(prompt)
-        )
+        ids = self.tokenizer.encode(prompt) if isinstance(prompt, str) else list(prompt)
         if not 0 < len(ids) < self.max_model_len:
             raise ValueError(
                 f"prompt has {len(ids)} tokens; must be between 1 and "
@@ -178,9 +172,7 @@ class Engine:
             elif n_out >= req.params.max_tokens or req.num_tokens >= self.max_model_len:
                 self.scheduler.finish(req, "length")
 
-            delta = self.detok[req.request_id].update(
-                req.output_ids, req.finished
-            )
+            delta = self.detok[req.request_id].update(req.output_ids, req.finished)
             self.num_generated_tokens += 1
 
             out = Output(

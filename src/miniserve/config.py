@@ -43,9 +43,7 @@ class EngineConfig:
         if self.attention_backend == "auto":
             # SDPA is the fast path on both CUDA and MPS. The torch reference
             # is only the default on CPU, where it is easier to debug.
-            self.attention_backend = (
-                "torch" if self.device.type == "cpu" else "sdpa"
-            )
+            self.attention_backend = "torch" if self.device.type == "cpu" else "sdpa"
 
         if self.attention_backend == "flash_attn":
             warnings.warn("FlashAttention is not available in this build; using sdpa")

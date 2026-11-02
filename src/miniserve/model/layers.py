@@ -55,9 +55,7 @@ class MLP(nn.Module):
         super().__init__()
         self.intermediate_size = intermediate_size
         self.gate_up_sizes = [intermediate_size, intermediate_size]
-        self.gate_up_proj = nn.Linear(
-            hidden_size, 2 * intermediate_size, bias=False
-        )
+        self.gate_up_proj = nn.Linear(hidden_size, 2 * intermediate_size, bias=False)
         self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
         self.act = _activation(act)
 
@@ -81,22 +79,16 @@ class MoE(nn.Module):
             cfg, "moe_intermediate_size", cfg.intermediate_size
         )
         self.num_experts = cfg.num_experts
-        self.top_k = min(
-            getattr(cfg, "num_experts_per_tok", 2), self.num_experts
-        )
+        self.top_k = min(getattr(cfg, "num_experts_per_tok", 2), self.num_experts)
         self.norm_topk_prob = getattr(cfg, "norm_topk_prob", False)
         self.act = _activation(getattr(cfg, "hidden_act", "silu"))
 
         # [E, 2 * inter, hidden] and [E, hidden, inter]
         self.w13 = nn.Parameter(
-            torch.empty(
-                self.num_experts, 2 * self.intermediate_size, self.hidden_size
-            )
+            torch.empty(self.num_experts, 2 * self.intermediate_size, self.hidden_size)
         )
         self.w2 = nn.Parameter(
-            torch.empty(
-                self.num_experts, self.hidden_size, self.intermediate_size
-            )
+            torch.empty(self.num_experts, self.hidden_size, self.intermediate_size)
         )
         self.gate = nn.Linear(self.hidden_size, self.num_experts, bias=False)
 
@@ -120,9 +112,9 @@ class MoE(nn.Module):
                 self.w2[expert_idx].copy_(weight)
             else:
                 start = 0 if proj == "gate_proj" else self.intermediate_size
-                self.w13[
-                    expert_idx, start : start + self.intermediate_size
-                ].copy_(weight)
+                self.w13[expert_idx, start : start + self.intermediate_size].copy_(
+                    weight
+                )
         return True
 
     def forward(self, x):

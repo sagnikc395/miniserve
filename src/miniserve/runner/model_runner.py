@@ -107,8 +107,7 @@ class ModelRunner:
                 else:
                     # CPU is a debugging path; just account for the weights.
                     peak = sum(
-                        p.numel() * p.element_size()
-                        for p in self.model.parameters()
+                        p.numel() * p.element_size() for p in self.model.parameters()
                     )
                 other = 0
 
@@ -128,9 +127,7 @@ class ModelRunner:
         # never allocate more pages than the scheduler could ever hand out;
         # the +1 is the reserved null page 0.
         max_blocks = cfg.max_num_seqs * self.max_blocks_per_seq + 1
-        budget = memory.kv_cache_budget(
-            total, cfg.gpu_memory_utilization, other, peak
-        )
+        budget = memory.kv_cache_budget(total, cfg.gpu_memory_utilization, other, peak)
         num_blocks = memory.num_blocks(budget, bytes_per_block, max_blocks)
 
         if num_blocks < 2:
@@ -147,9 +144,7 @@ class ModelRunner:
         for layer in self.model.layers:
             attn = getattr(layer, "self_attn", None) or getattr(layer, "attn", None)
             if attn is not None:
-                attn.kv_cache = torch.zeros(
-                    shape, dtype=cfg.dtype, device=device
-                )
+                attn.kv_cache = torch.zeros(shape, dtype=cfg.dtype, device=device)
 
         print(
             f"[miniserve] KV Cache: {num_blocks} blocks x {cfg.block_size} tokens "

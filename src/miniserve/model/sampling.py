@@ -20,9 +20,7 @@ def sample(logits, params: list[SamplingParams], token_ids=None):
     else:
         dev = logits.device
 
-        temp = torch.tensor(
-            [p.temperature or 1.0 for p in params], device=dev
-        )
+        temp = torch.tensor([p.temperature or 1.0 for p in params], device=dev)
         scaled = logits / temp[:, None]  # B * V / B * 1
 
         V = scaled.shape[-1]
@@ -39,9 +37,7 @@ def sample(logits, params: list[SamplingParams], token_ids=None):
         probs = sorted_logits.softmax(axis=1)
 
         # drop a sorted position if it fails top-p or top-k
-        drop = (ranks >= top_k[:, None]) | (
-            probs.cumsum(-1) - probs > top_p[:, None]
-        )
+        drop = (ranks >= top_k[:, None]) | (probs.cumsum(-1) - probs > top_p[:, None])
         sorted_logits = sorted_logits.masked_fill(drop, float("-inf"))
 
         # idx -> how we sorted it and then unsorted it
@@ -53,9 +49,7 @@ def sample(logits, params: list[SamplingParams], token_ids=None):
         sampled = (probs.log() + gumbel).argmax(-1)
 
         # rows with temperature 0 are replaced by their argmax
-        is_greedy = torch.tensor(
-            [p.temperature == 0 for p in params], device=dev
-        )
+        is_greedy = torch.tensor([p.temperature == 0 for p in params], device=dev)
         tokens = torch.where(is_greedy, greedy, sampled).tolist()
 
     if token_ids is not None:

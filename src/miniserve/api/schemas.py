@@ -107,12 +107,8 @@ def build_sampling_params(
         if request.temperature is not None
         else defaults.get("temperature", 1.0)
     )
-    top_p = (
-        request.top_p if request.top_p is not None else defaults.get("top_p", 1.0)
-    )
-    top_k = (
-        request.top_k if request.top_k is not None else defaults.get("top_k", -1)
-    )
+    top_p = request.top_p if request.top_p is not None else defaults.get("top_p", 1.0)
+    top_k = request.top_k if request.top_k is not None else defaults.get("top_k", -1)
 
     remaining = max(1, max_model_len - prompt_len)
     requested = getattr(request, "max_completion_tokens", None) or request.max_tokens

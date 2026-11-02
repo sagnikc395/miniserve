@@ -27,9 +27,7 @@ def _prompts(engine, body: CompletionRequest):
             return [list(prompt)]
         if all(isinstance(x, str) for x in prompt):
             return list(prompt)
-    raise APIError(
-        400, "prompt must be a string or a list of strings", param="prompt"
-    )
+    raise APIError(400, "prompt must be a string or a list of strings", param="prompt")
 
 
 @router.post("/v1/completions")
@@ -45,14 +43,10 @@ async def completions(
 
     prompts = _prompts(engine, body)
     if body.stream and len(prompts) != 1:
-        raise APIError(
-            400, "streaming requires exactly one prompt", param="prompt"
-        )
+        raise APIError(400, "streaming requires exactly one prompt", param="prompt")
 
     if body.stream:
-        include_usage = bool(
-            body.stream_options and body.stream_options.include_usage
-        )
+        include_usage = bool(body.stream_options and body.stream_options.include_usage)
         return StreamingResponse(
             _stream(aeng, prompts[0], body, include_usage),
             media_type="text/event-stream",
@@ -81,16 +75,12 @@ async def completions(
         async for out in aeng.generate(ids, params, request_id=rid):
             final = out
         if final is None:
-            raise APIError(
-                500, "the engine produced no output", type="server_error"
-            )
+            raise APIError(500, "the engine produced no output", type="server_error")
         final_for_usage = final
         text = final.text
         if body.echo:
             text = (
-                prompt
-                if isinstance(prompt, str)
-                else engine.tokenizer.decode(ids)
+                prompt if isinstance(prompt, str) else engine.tokenizer.decode(ids)
             ) + text
         choices.append(
             {

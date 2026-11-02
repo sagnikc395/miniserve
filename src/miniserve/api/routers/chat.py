@@ -48,8 +48,7 @@ async def chat_completions(
     if len(ids) >= cfg.max_model_len:
         raise APIError(
             400,
-            f"prompt is too long: {len(ids)} tokens > "
-            f"{cfg.max_model_len - 1} maximum",
+            f"prompt is too long: {len(ids)} tokens > {cfg.max_model_len - 1} maximum",
             param="messages",
             code="context_length_exceeded",
         )
@@ -64,9 +63,7 @@ async def chat_completions(
     model = body.model or cfg.model
 
     if body.stream:
-        include_usage = bool(
-            body.stream_options and body.stream_options.include_usage
-        )
+        include_usage = bool(body.stream_options and body.stream_options.include_usage)
         return StreamingResponse(
             _stream(aeng, ids, params, rid, model, include_usage),
             media_type="text/event-stream",

@@ -55,9 +55,7 @@ def _common_options(fn):
         click.option("--max-model-len", default=4096, show_default=True),
         click.option("--max-num-seqs", default=16, show_default=True),
         click.option("--max-num-batched-tokens", default=1024, show_default=True),
-        click.option(
-            "--gpu-memory-utilization", default=0.60, show_default=True
-        ),
+        click.option("--gpu-memory-utilization", default=0.60, show_default=True),
         click.option(
             "--attention-backend",
             type=click.Choice(["auto", "sdpa", "torch", "flash_attn"]),
