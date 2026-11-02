@@ -7,6 +7,101 @@ This uses a simplified implementation of
 - SDPA(Flash Attention is CUDA dependent) , 
 
 
+### Commands
+
+Everything runs through one CLI: `python main.py <command>` from the repository
+root, or `miniserve <command>` after `uv sync`.
+
+```bash
+uv sync                      # install
+python main.py --help        # serve | generate | bench | attn-demo | kv-demo
+```
+
+`serve`, `generate` and `bench` share the engine flags:
+
+| flag | default | what it does |
+| --- | --- | --- |
+| `--model` | `Qwen/Qwen3-0.6B` | HF model id or a local checkpoint directory (`MINISERVE_MODEL`) |
+| `--device` | `auto` | `auto` picks mps, then cuda, then cpu |
+| `--dtype` | `auto` | fp16 on mps, bf16 on cuda, fp32 on cpu |
+| `--max-model-len` | `4096` | longest prompt + output, in tokens |
+| `--max-num-seqs` | `16` | requests the scheduler keeps running at once |
+| `--max-num-batched-tokens` | `1024` | per-step token budget that drives chunked prefill |
+| `--gpu-memory-utilization` | `0.60` | share of device memory the KV cache may take |
+| `--attention-backend` | `auto` | `sdpa`, `torch` (reference), or `flash_attn` (falls back to sdpa) |
+| `--block-size` | `16` | tokens per KV page |
+| `--prefix-caching / --no-prefix-caching` | on | reuse pages across requests sharing a prefix |
+| `--cuda-graphs / --no-cuda-graphs` | off | CUDA only, ignored elsewhere |
+
+**serve** — OpenAI-compatible HTTP server:
+
+```bash
+python main.py serve --model Qwen/Qwen3-0.6B --port 8000
+```
+
+```bash
+curl localhost:8000/v1/chat/completions -H 'content-type: application/json' -d '{
+  "model": "Qwen/Qwen3-0.6B",
+  "messages": [{"role": "user", "content": "explain paged attention"}],
+  "max_tokens": 128,
+  "stream": true
+}'
+```
+
+`/v1/completions`, `/v1/models`, `/health` and `/stats` are served too;
+`/metrics` exposes the same counters to Prometheus (see `docs/MONITORING.md`).
+
+**generate** — one prompt, no server:
+
+```bash
+python main.py generate -p "explain paged attention" --chat --max-tokens 128
+python main.py generate -p "2 + 2 =" --temperature 0.7 --top-p 0.9 --no-stream
+```
+
+### Benchmarks
+
+`bench` runs the same prompt set three ways and prints one table: miniserve with
+prefix caching, miniserve without it, and optionally Hugging Face `generate` as a
+static-batching baseline. Each arm loads its own engine, does a throwaway warm-up
+request so lazy kernel compilation is not timed, then measures from the moment
+requests are submitted.
+
+```bash
+# default: 16 prompts, 64 new tokens each, both miniserve arms
+python main.py bench
+
+# add the Hugging Face baseline, and push the engine harder
+python main.py bench --hf-baseline --num-prompts 64 --max-tokens 128
+
+# small and quick, useful while changing the scheduler
+python main.py bench --model HuggingFaceTB/SmolLM2-135M-Instruct \
+  --num-prompts 8 --max-tokens 16 --max-num-seqs 4 --max-num-batched-tokens 512
+
+# isolate a backend or the paged-cache path
+python main.py bench --attention-backend torch --device cpu
+```
+
+| column | meaning |
+| --- | --- |
+| `req/s` | finished requests per second of wall clock |
+| `out tok/s` | generated tokens per second |
+| `tot tok/s` | prompt + generated tokens per second |
+| `p50 ttft` | median time to first token (`-` for the HF baseline, which gives no per-token timing) |
+| `p50 / p90 lat` | end-to-end latency per request, measured from submission |
+| `cached` | share of prompt tokens served from the prefix cache |
+
+The prompt set lives in `src/miniserve/benchmarks/prompts.py`: a deterministic mix
+of short and long instructions behind a shared system prompt, rendered through the
+model's chat template, so prefix caching has something real to hit. The baseline
+also reports `padded_prompt_tokens` in its result dict, which is the padding waste
+static batching pays and continuous batching does not.
+
+```bash
+python main.py attn-demo    # compare paged attention backends on a toy pool
+python main.py kv-demo      # step through the KV cache manager by hand
+uv run pytest               # test suite
+```
+
 ### Architecture
 ```mermaid
 flowchart LR

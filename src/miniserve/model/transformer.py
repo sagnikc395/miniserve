@@ -34,10 +34,17 @@ class Model(nn.Module):
 
         theta = getattr(cfg, "rope_theta", None) or rope.get("rope_theta", 10000.0)
         D = getattr(cfg, "head_dim", None) or cfg.hidden_size // cfg.num_attention_heads
-        inv_freq = 1.0 / theta ** (torch.arange(0, D, 2, dtype=torch.float64) / D)
-        freqs = torch.outer(torch.arange(max_position, dtype=torch.float64), inv_freq)
-        self.register_buffer("cos", freqs.cos().float(), persistent=False)
-        self.register_buffer("sin", freqs.sin().float(), persistent=False)
+        # build the table in float64 on the CPU (MPS has no float64 at all),
+        # then move the float32 result to wherever the model is being built
+        device = torch.empty(0).device
+        inv_freq = 1.0 / theta ** (
+            torch.arange(0, D, 2, dtype=torch.float64, device="cpu") / D
+        )
+        freqs = torch.outer(
+            torch.arange(max_position, dtype=torch.float64, device="cpu"), inv_freq
+        )
+        self.register_buffer("cos", freqs.cos().float().to(device), persistent=False)
+        self.register_buffer("sin", freqs.sin().float().to(device), persistent=False)
 
     def forward(self, input_ids, positions):
         cos, sin = self.cos[positions], self.sin[positions]
