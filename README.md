@@ -58,6 +58,30 @@ python main.py generate -p "explain paged attention" --chat --max-tokens 128
 python main.py generate -p "2 + 2 =" --temperature 0.7 --top-p 0.9 --no-stream
 ```
 
+### Chat UI
+
+`tui.py` is a terminal chat client, kept out of the package on purpose: it is a
+separate process that only speaks HTTP to a server, so the server keeps the
+model, the KV cache and the device to itself. It streams
+`/v1/chat/completions` with `stream=true` and shows tokens/s, time to first
+token and how much of each prompt the prefix cache served.
+
+```bash
+python main.py serve --model Qwen/Qwen3-0.6B   # one terminal
+python tui.py                                  # another terminal
+
+# or let the ui own the server and stop it again on exit
+python tui.py --spawn --model HuggingFaceTB/SmolLM2-135M-Instruct
+python tui.py --spawn --serve-args='--device cpu --max-num-seqs 4'
+python tui.py --base-url http://127.0.0.1:8000 --max-tokens 256 --temperature 0.2
+```
+
+With `--spawn` the server runs as a child process, its log goes to
+`$TMPDIR/miniserve-serve-<pid>.log`, and the ui waits on `/health` while the
+weights load. Keys: enter sends, escape stops the running generation, ctrl+r
+starts a fresh conversation, ctrl+c quits. The client needs `textual` and
+`httpx`, both in the dev group, so `uv sync` is enough.
+
 ### Benchmarks
 
 `bench` runs the same prompt set three ways and prints one table: miniserve with
