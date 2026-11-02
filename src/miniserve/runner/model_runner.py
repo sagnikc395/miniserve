@@ -144,5 +144,11 @@ class ModelRunner:
             if attn is not None:
                 attn.kv_cache = torch.zeros(shape, dtype=cfg.dtype, device=device)
 
+        print(
+            f"[miniserve] KV Cache: {num_blocks} blocks x {cfg.block_size} tokens "
+            f"= {num_blocks * cfg.block_size} tokens "
+            f"({num_blocks * bytes_per_block / 2**30:.1f} GiB)"
+        )
+
         self.num_blocks = num_blocks
         return num_blocks
