@@ -10,7 +10,7 @@ unpaged attention written out with plain matmuls. Run with
 import torch
 
 from miniserve.attention.metadata import AttnMetadata
-from miniserve.attention.torch_ref import torch_ref_attention
+from miniserve.attention.paged_sdpa import torch_ref_attention
 
 BLOCK_SIZE = 4  # tokens per page, deliberately tiny so pages are easy to read
 NUM_PAGES = 16

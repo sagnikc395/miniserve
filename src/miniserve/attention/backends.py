@@ -3,7 +3,6 @@ from collections.abc import Callable
 import torch
 
 from miniserve.attention.metadata import AttnMetadata
-from miniserve.attention.torch_ref import torch_ref_attention
 
 # Every backend is a pure function over the paged pool, which keeps the registry
 # independent of Config and of the nn.Module that calls it.
@@ -21,13 +20,17 @@ AttentionFn = Callable[
 
 
 def load_torch_ref() -> AttentionFn:
+    # imported on use: paged_sdpa imports AttentionFn from here, so a module
+    # scope import either way round would be a cycle.
+    from miniserve.attention.paged_sdpa import torch_ref_attention
+
     return torch_ref_attention
 
 
 def load_paged_sdpa() -> AttentionFn:
     from miniserve.attention.paged_sdpa import paged_sdpa_attention
 
-    return paged_sdpa_attention
+    return paged_sdpa_attention()
 
 
 ATTENTION_BACKENDS: dict[str, Callable[[], AttentionFn]] = {
