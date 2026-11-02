@@ -2,7 +2,7 @@
 
 import click
 
-from miniserve.demos import attention_demo, kv_demo
+from demos import attention_demo, kv_demo
 
 
 @click.group()
