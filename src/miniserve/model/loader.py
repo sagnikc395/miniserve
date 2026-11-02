@@ -14,9 +14,7 @@ EXPERT_KEY = re.compile(
 )
 
 # <module path>.<q|k|v|gate|up>_proj.<weight|bias> -> a slice of a fused projection
-FUSED_KEY = re.compile(
-    r"(.*)\.(q_proj|k_proj|v_proj|gate_proj|up_proj)\.(weight|bias)"
-)
+FUSED_KEY = re.compile(r"(.*)\.(q_proj|k_proj|v_proj|gate_proj|up_proj)\.(weight|bias)")
 
 # which fused projection a checkpoint tensor belongs to, and its position in it
 FUSED_PARTS = {
