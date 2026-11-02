@@ -2,9 +2,9 @@ from miniserve.attention.backends import ATTENTION_BACKENDS
 from miniserve.attention.forward_context import set_forward_context
 from miniserve.model.loader import load_model
 from miniserve.platform import device_memory
-from mpmath.libmp.libelefun import bs_chudnovsky
 import torch
 import numpy as np
+from miniserve.attention.metadata import AttnMetadata
 
 class ModelRunner:
     # turns the schedulers decisions into GPU tensors
@@ -149,7 +149,7 @@ class ModelRunner:
         print(
             f"[miniserve] KV Cache: {num_blocks} blocks x {cfg.block_size} tokens "
             f"= {num_blocks * cfg.block_size} tokens "
-            f"({num_blocks * bytes_per_block / 2**30:.1f} GiB)"
+            f"({num_blocks * bytes_per_block / 2**30:.1f} GB)"
         )
 
         self.num_blocks = num_blocks
@@ -207,3 +207,19 @@ class ModelRunner:
         self.query_start_loc[:B+1].copy_(torch.tensor(qsl))
         self.cu_seqlens_k[:B+1].copy_(torch.tensor([0] + np.cumsum(seq_lens).tolist()))
         self.block_table[:B].copy_(torch.from_numpy(bt))
+
+        # build the attn metadata
+        max_seq = self.cfg.max_model_len if forward_graph else max(seq_lens)
+
+        meta=AttnMetadata(
+            self.slot_mapping[:T],
+            self.query_start_loc[:B+1],
+            self.cu_seqlens_k[:B+1],
+            self.block_table[:B],
+            B,
+            max(s.num_new for s in batch) if batch else 1, #max_query_len
+            max_seq,
+            qsl, seq_lens, # host copies for torch_ref
+        )
+
+        return T, meta, logit_rows
