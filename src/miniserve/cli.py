@@ -77,7 +77,7 @@ def _common_options(fn):
 @click.group()
 @click.version_option("0.1.0", prog_name="miniserve")
 def main():
-    """A tiny vLLM-style inference server."""
+    """miniserve: a tiny inference server."""
 
 
 @main.command()
