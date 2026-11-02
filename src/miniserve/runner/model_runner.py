@@ -13,21 +13,21 @@ class ModelRunner:
     # turns the schedulers decisions into GPU tensors
     # and then runs the model
 
-    def __init__(self,cfg):
+    def __init__(self, cfg):
         self.cfg = cfg
         # the device the whole runner lives on: cuda, mps or cpu
         self.device = cfg.device
         torch.manual_seed(cfg.seed)
 
-        #load the model
-        self.model = load_model(cfg.model,cfg.dtype,cfg.max_model_len)
+        # load the model
+        self.model = load_model(cfg.model, cfg.dtype, cfg.max_model_len)
 
         # get the model config
         mc = self.model.cfg
 
         # get the metadata
-        self.H ,self.Hkv = mc.num_attention_heads, mc.num_key_value_heads
-        self.p = getattr(mc,"head_dim",None) or mc.hidden_size // self.H
+        self.H, self.Hkv = mc.num_attention_heads, mc.num_key_value_heads
+        self.p = getattr(mc, "head_dim", None) or mc.hidden_size // self.H
         self.num_layers = mc.num_hidden_layers
 
         # TODO: set attention backends
@@ -37,29 +37,33 @@ class ModelRunner:
         self.max_blocks_per_seq = -(-cfg.max_model_len // cfg.block_size)
 
         # build persistent buffers for the decode path
-        N, S  = cfg.max_num_batched_tokens, cfg.max_num_seqs
+        N, S = cfg.max_num_batched_tokens, cfg.max_num_seqs
 
         # helper method to create an input with a given shape
-        z = lambda *shape, dt=torch.int32: torch.zeros(*shape, dtype=dt, device=self.device)
+        z = lambda *shape, dt=torch.int32: torch.zeros(
+            *shape, dtype=dt, device=self.device
+        )
 
         # create some dummy inuts to act as our buffer
         # when we are decoding , leverage the CUDA graph
-        self.input_ids , self.positions = z(N,dt=torch.int64), z(N,dt=torch.int64)
-        self.slot_mapping = z(N,dt=torch.int64)
+        self.input_ids, self.positions = z(N, dt=torch.int64), z(N, dt=torch.int64)
+        self.slot_mapping = z(N, dt=torch.int64)
         # when we are decoding, we do it on the CPU
-        self.query_start_loc, self.cu_seqlens_k = z(S+1), z(S+1)
+        self.query_start_loc, self.cu_seqlens_k = z(S + 1), z(S + 1)
         self.block_table = z(S, self.max_blocks_per_seq)
 
         # a place to store the graphs : ("decode", batch_size) or ("mixed",token count)
         # acts like a replay graph
         # instead of capture every cuda graph at some granular level and then pad our data when we are decoding
-        self.graphs: dict[tuple[str,int],tuple[torch.cuda.CUDAGraph,torch.Tensor]] = {}
+        self.graphs: dict[
+            tuple[str, int], tuple[torch.cuda.CUDAGraph, torch.Tensor]
+        ] = {}
 
         # last step's sampled token ids.
         # stay on th GPU (next step's inut ids copied from here) and also go to pinned host memory
         # in the background, where Engine.step will pick hem up once they arrived.
         #
-        self.prev_tokens = z(S,dt=torch.int64)
+        self.prev_tokens = z(S, dt=torch.int64)
         # pinned host memory is a CUDA transfer optimisation; MPS unified memory
         # does not need it (and `pin_memory` is a no-op there).
         self.tokens_host = torch.zeros(
@@ -74,7 +78,7 @@ class ModelRunner:
         # (upto the set gpu_memory_utilization)
         device, cfg = self.device, self.cfg
 
-        #1. ensure that ATTN_META is just None for now
+        # 1. ensure that ATTN_META is just None for now
         with set_forward_context(None):
             # reset the status (CUDA keeps a persistent high-water mark)
             if device.type == "cuda":
@@ -158,71 +162,76 @@ class ModelRunner:
         self.num_blocks = num_blocks
         return num_blocks
 
-    def _prepare(self,batch,pad_to,forward_graph=False):
+    def _prepare(self, batch, pad_to, forward_graph=False):
         # all the metadata that we need to write
 
         bs = self.cfg.block_size
 
-        #packed streams we will copy onto the GPU buffers
-        ids, pos, slots, logit_rows = [],[],[],[]
-        qsl,seq_lens = [0],[] # qsl starts at 0 , we append the rest
+        # packed streams we will copy onto the GPU buffers
+        ids, pos, slots, logit_rows = [], [], [], []
+        qsl, seq_lens = [0], []  # qsl starts at 0 , we append the rest
 
         # page table for real + dummy rows, max block need possibly for a single sequence
-        bt = np.zeros((max(len(batch),pad_to),self.max_blocks_per_seq),dtype=np.int32)
+        bt = np.zeros(
+            (max(len(batch), pad_to), self.max_blocks_per_seq), dtype=np.int32
+        )
 
         for i, s in enumerate(batch):
             start, n = s.num_computed, s.num_new
-            p = np.arange(start,start+n)
+            p = np.arange(start, start + n)
             blocks = np.asarray(s.req_block_ids)
 
             # now store the metadata information back to the vars that we defined
 
-            #1.pack together each batch into a single stream
-            ids.extend(s.req.token_ids[start:start+n]) # packed input ids
-            #position embeds restart from 0 fro every sample
-            pos.extend(p.tolist()) # RoPE/ Causal positions
+            # 1.pack together each batch into a single stream
+            ids.extend(s.req.token_ids[start : start + n])  # packed input ids
+            # position embeds restart from 0 fro every sample
+            pos.extend(p.tolist())  # RoPE/ Causal positions
 
             # slot = page * bs + offset , destination of index_copy_ for each new token
-            slots.extend((blocks[p//bs] * bs + p % bs).tolist())
+            slots.extend((blocks[p // bs] * bs + p % bs).tolist())
 
             # request i owns q[qsl[i]:qsl[i+1]]
-            qsl.append(qsl[-1]+n)
+            qsl.append(qsl[-1] + n)
             # kv_len after this step's write
-            seq_lens.append(start+n)
+            seq_lens.append(start + n)
             # page-table row
-            bt[i,:len(blocks)] = blocks
-            #last packed row -> grab the actual rows that we will grab to project the softmax
-            logit_rows.append(qsl[-1] -1)
+            bt[i, : len(blocks)] = blocks
+            # last packed row -> grab the actual rows that we will grab to project the softmax
+            logit_rows.append(qsl[-1] - 1)
 
-        for _ in range(len(batch),pad_to):
+        for _ in range(len(batch), pad_to):
             ids.append(0)
             pos.append(0)
             slots.append(0)
-            qsl.append(qsl[-1]+1)
+            qsl.append(qsl[-1] + 1)
             seq_lens.append(1)
 
-        T,B = len(ids),len(seq_lens)
+        T, B = len(ids), len(seq_lens)
         # now need to write this to persistent buffers
         # fixed addresses for CUDA graphs
         self.input_ids[:T].copy_(torch.tensor(ids))
         self.positions[:T].copy_(torch.tensor(pos))
         self.slot_mapping[:T].copy_(torch.tensor(slots))
-        self.query_start_loc[:B+1].copy_(torch.tensor(qsl))
-        self.cu_seqlens_k[:B+1].copy_(torch.tensor([0] + np.cumsum(seq_lens).tolist()))
+        self.query_start_loc[: B + 1].copy_(torch.tensor(qsl))
+        self.cu_seqlens_k[: B + 1].copy_(
+            torch.tensor([0] + np.cumsum(seq_lens).tolist())
+        )
         self.block_table[:B].copy_(torch.from_numpy(bt))
 
         # build the attn metadata
         max_seq = self.cfg.max_model_len if forward_graph else max(seq_lens)
 
-        meta=AttnMetadata(
+        meta = AttnMetadata(
             self.slot_mapping[:T],
-            self.query_start_loc[:B+1],
-            self.cu_seqlens_k[:B+1],
+            self.query_start_loc[: B + 1],
+            self.cu_seqlens_k[: B + 1],
             self.block_table[:B],
             B,
-            max(s.num_new for s in batch) if batch else 1, #max_query_len
+            max(s.num_new for s in batch) if batch else 1,  # max_query_len
             max_seq,
-            qsl, seq_lens, # host copies for torch_ref
+            qsl,
+            seq_lens,  # host copies for torch_ref
         )
 
         return T, meta, logit_rows
@@ -253,15 +262,38 @@ class ModelRunner:
         pool = torch.cuda.graph_pool_handle()
 
         for batch_size in reverse(self.graph_sizes()):
-            T, meta, _ = self._prepare([],pad_to=batch_size,forward_graph=True)
+            T, meta, _ = self._prepare([], pad_to=batch_size, forward_graph=True)
             ATTN_META = meta
 
-            self.model(self.input_ids[:T],self.positions[:T])
-            with torch.cuda.graph(g,pool=pool):
-                out = self.model(self.input_ids[:T],self.positions[:T])
+            self.model(self.input_ids[:T], self.positions[:T])
+            with torch.cuda.graph(g, pool=pool):
+                out = self.model(self.input_ids[:T], self.positions[:T])
 
             # this cuda graph take the buffers that we defined in 206-211
             # and write to this specific output locations in out
-            self.graphs[batch_size] = (g,out)
+            self.graphs[batch_size] = (g, out)
 
-        print(f"[miniserve] captured ({len(self.graphs)}) decode CUDA graphs in ({time.time() - t:._2Df}) s.")
+        print(
+            f"[miniserve] captured ({len(self.graphs)}) decode CUDA graphs in ({time.time() - t:._2Df}) s."
+        )
+
+    @torch.inference_mode()
+    def run(self, batch):
+        global ATTN_META
+
+        # if everything is decoding, that means we are done
+        is_decode = all(s.num_new == 1 for s in batch)
+
+        size = next((s for s in self.graph_sizes() if s >= len(batch)), None)
+
+        if self.graphs and is_decode and size is not None:
+            T, ATTN_META, rows = self._prepare(batch, pad_to=size, forward_graph=True)
+            graph, out = self.graphs[size]
+            graph.replay()
+            hidden = out
+        else:
+            T, ATTN_META, rows = self._prepare(batch)
+            hidden = self.model(self.input_ids[:T],self.positions[:T])
+
+        logits = self.model.logits(hidden[rows])
+        return sample(logits,[s.req.params for s in batch]), logits

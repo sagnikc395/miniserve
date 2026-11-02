@@ -75,13 +75,16 @@ def load_model(
     # weigh the checkpoint never filled would silently stay random , so fail here
     # this is usually a new architeture whose names dont match ours
     missing = sorted(set(params) - loaded)
-    assert not missing, f"{len(missing)} parameters not found in the checkpoints e.g. {missing[:3]}"
+    assert not missing, (
+        f"{len(missing)} parameters not found in the checkpoints e.g. {missing[:3]}"
+    )
 
     # the other directions : checkpoint tensors we have no place for. harmless for a tied lm_head
     # but eg: Qwen1.5-MoE's shared_expert would be silently dropped
     if unused and tp_rank == 0:
         warnings.warn(f"ignored {len(unused)} checkpoint tensors, e.g {unused[:3]}")
     return model.eval()
+
 
 def to_gpu(data, dtype=None) -> torch.Tensor:
     ## host data (list or numpy) -> GPU tensor
