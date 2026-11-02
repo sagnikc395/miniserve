@@ -6,7 +6,7 @@ from transformers.models.auto.tokenization_auto import AutoTokenizer
 from miniserve.runner.model_runner import ModelRunner
 from miniserve.core.scheduler import Scheduler
 from miniserve.core.sequence import Request
-
+import uuid
 
 @dataclass(slots=True)
 class Output:
@@ -81,3 +81,24 @@ class Engine:
         # setup storage for the rest
         self.detok: dict[str,Detokenizer] = {}
         self.requests: dict[str,Request] = {}
+
+    def add_request(self,prompt,params,request_id=None):
+        ids = self.tokenizer.encode(prompt) if isinstance(prompt,str) else list(prompt)
+        assert 0 < len(ids) < self.cfg.max_model_len, "prompt is too long"
+
+        req_id = request_id or uuid.uuid4().hex
+
+        self.request[req_id] = req = Request(req_id,ids,params=)
+        self.scheduler.add(req)
+        self.detok[req_id] = Detokenizer(self.tokenizer)
+        return req_id
+
+    def abort(self,request_id: str):
+        # client has disappeared , just stop and give its KV blcoks back.
+        req = self.requests.pop(request_id,None)
+        if req is not None and not req.finished:
+            self.scheduler.finish(req,"abort")
+            self.detok.pop(request_id, None)
+
+    def has_work(self):
+        return self.scheduler.has_work()
