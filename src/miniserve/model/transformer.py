@@ -1,17 +1,23 @@
 import torch
-from miniserve.model.layers import RMSNorm, DecoderLayer, add_rmsnorm
 from torch import nn
+
+from miniserve.model.layers import DecoderLayer, RMSNorm, add_rmsnorm
 
 
 class Model(nn.Module):
-    def __init__(self, cfg, max_position: int):
+    def __init__(self, cfg, max_position: int, attn_fn=None):
         super().__init__()
+
+        if attn_fn is None:
+            from miniserve.attention.backends import get_attention_fn
+
+            attn_fn = get_attention_fn("torch")
 
         self.cfg = cfg
         self.embed_tokens = nn.Embedding(cfg.vocab_size, cfg.hidden_size)
 
         self.layers = nn.ModuleList(
-            DecoderLayer(cfg, i) for i in range(cfg.num_hidden_layers)
+            DecoderLayer(cfg, i, attn_fn) for i in range(cfg.num_hidden_layers)
         )
         self.norm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps)
         self.tie = getattr(cfg, "tie_word_embeddings", False)
@@ -19,7 +25,7 @@ class Model(nn.Module):
         if not self.tie:
             self.lm_head = nn.Linear(cfg.hidden_size, cfg.vocab_size, bias=False)
 
-        # RoPE table , indexed by absolute position
+        # RoPE table, indexed by absolute position
         rope = (
             getattr(cfg, "rope_parameters", None)
             or getattr(cfg, "rope_scaling", None)

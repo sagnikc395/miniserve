@@ -1,38 +1,20 @@
-## main cli entrypoint for the inference and running everything
+"""Development entry point: `python main.py <command>`.
 
-import click
+The installed console script is `miniserve`, which points at
+`miniserve.cli:main`. This wrapper also puts `src/` (and the repository root,
+for `demos/`) on `sys.path`, so the repository works without an editable
+install.
+"""
 
-from demos import attention_demo, kv_demo
+import sys
+from pathlib import Path
 
+ROOT = Path(__file__).resolve().parent
+for path in (ROOT, ROOT / "src"):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
-@click.group()
-def main():
-    pass
-
-
-@main.command()
-def serve():
-    raise click.ClickException("serve is not implemented yet")
-
-
-@main.command()
-def generate():
-    raise click.ClickException("generate is not implemented yet")
-
-
-@main.command()
-def bench():
-    raise click.ClickException("bench is not implemented yet")
-
-
-@main.command("attn-demo")
-def attn_demo():
-    attention_demo.demo()
-
-
-@main.command("kv-demo")
-def kv_demo_cmd():
-    kv_demo.demo()
+from miniserve.cli import main  # noqa: E402
 
 
 if __name__ == "__main__":

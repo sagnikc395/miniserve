@@ -1,15 +1,17 @@
+from miniserve.attention.backends import get_attention_fn
 from miniserve.attention.forward_context import set_forward_context
+from miniserve.attention.metadata import AttnMetadata
 from miniserve.model.loader import load_model
 from miniserve.model.sampling import sample
 from miniserve.platform import device_memory
-import torch
+from miniserve.runner import memory
 import numpy as np
-from miniserve.attention.metadata import AttnMetadata
+import torch
 import time
 
 
 class ModelRunner:
-    # turns the schedulers decisions into GPU tensors
+    # turns the scheduler's decisions into GPU tensors
     # and then runs the model
 
     def __init__(self, cfg):
@@ -18,9 +20,15 @@ class ModelRunner:
         self.device = cfg.device
         torch.manual_seed(cfg.seed)
 
+        self.attn_fn = get_attention_fn(cfg.attention_backend)
+
         # load the model
         self.model = load_model(
-            cfg.model, cfg.dtype, cfg.max_model_len, device=self.device
+            cfg.model,
+            cfg.dtype,
+            cfg.max_model_len,
+            device=self.device,
+            attn_fn=self.attn_fn,
         )
 
         # get the model config
@@ -31,10 +39,8 @@ class ModelRunner:
         self.p = getattr(mc, "head_dim", None) or mc.hidden_size // self.H
         self.num_layers = mc.num_hidden_layers
 
-        # TODO: set attention backends
-
         # set the max blocks per sequence (if our model supports lens upto 1024, and our block size
-        # is 256, we can have at ost 4 blocks)
+        # is 256, we can have at most 4 blocks)
         self.max_blocks_per_seq = -(-cfg.max_model_len // cfg.block_size)
 
         # build persistent buffers for the decode path
@@ -44,36 +50,23 @@ class ModelRunner:
         def z(*shape, dt=torch.int32):
             return torch.zeros(*shape, dtype=dt, device=self.device)
 
-        # create some dummy inuts to act as our buffer
-        # when we are decoding , leverage the CUDA graph
+        # create some dummy inputs to act as our buffers; when we are decoding,
+        # this lets CUDA graphs reuse the same addresses every step
         self.input_ids, self.positions = z(N, dt=torch.int64), z(N, dt=torch.int64)
         self.slot_mapping = z(N, dt=torch.int64)
         # when we are decoding, we do it on the CPU
         self.query_start_loc, self.cu_seqlens_k = z(S + 1), z(S + 1)
         self.block_table = z(S, self.max_blocks_per_seq)
 
-        # a place to store the graphs : ("decode", batch_size) or ("mixed",token count)
-        # acts like a replay graph
-        # instead of capture every cuda graph at some granular level and then pad our data when we are decoding
+        # a place to store the graphs : batch size -> (graph, output tensor)
         self.graphs: dict[int, tuple[torch.cuda.CUDAGraph, torch.Tensor]] = {}
-
-        # last step's sampled token ids.
-        # stay on th GPU (next step's inut ids copied from here) and also go to pinned host memory
-        # in the background, where Engine.step will pick hem up once they arrived.
-        #
-        self.prev_tokens = z(S, dt=torch.int64)
-        # pinned host memory is a CUDA transfer optimisation; MPS unified memory
-        # does not need it (and `pin_memory` is a no-op there).
-        self.tokens_host = torch.zeros(
-            S, dtype=torch.int64, pin_memory=self.device.type == "cuda"
-        )
 
     @torch.inference_mode()
     def allocate_kv_cache(self):
         # we first have to allocate the KV Cache
         # run the largest possible batch without a cache, measure peak memory
-        # created by the activations and intermediate computations and give the rest to KV
-        # (upto the set gpu_memory_utilization)
+        # created by the activations and intermediate computations and give the
+        # rest to KV (up to the set gpu_memory_utilization)
         device, cfg = self.device, self.cfg
 
         # 1. ensure that ATTN_META is just None for now
@@ -106,16 +99,16 @@ class ModelRunner:
             else:
                 total = device_memory(device)[0]
                 # MPS uses unified memory: recommended_max_memory() is Metal's
-                # working-set budget, and there is no separate "someone else's
-                # memory" pool to subtract. There is also no peak counter, but
-                # the driver allocation never shrinks, so it is the high-water
-                # mark of weights + activations + the allocator's cached blocks.
+                # working-set budget. There is also no peak counter, but the
+                # driver allocation never shrinks, so it is the high-water mark
+                # of weights + activations.
                 if device.type == "mps":
                     peak = torch.mps.driver_allocated_memory()
                 else:
                     # CPU is a debugging path; just account for the weights.
                     peak = sum(
-                        p.numel() * p.element_size() for p in self.model.parameters()
+                        p.numel() * p.element_size()
+                        for p in self.model.parameters()
                     )
                 other = 0
 
@@ -124,16 +117,21 @@ class ModelRunner:
 
         # bytes per page: K and V, every layer, block_size tokens, one KV head
         # per group, head_dim each, in the configured dtype
-        element_size = torch.finfo(cfg.dtype).bits // 8
-        bytes_per_block = (
-            2 * self.num_layers * cfg.block_size * self.Hkv * self.p * element_size
+        bytes_per_block = memory.kv_cache_bytes_per_block(
+            self.num_layers,
+            cfg.block_size,
+            self.Hkv,
+            self.p,
+            cfg.dtype,
         )
 
         # never allocate more pages than the scheduler could ever hand out;
         # the +1 is the reserved null page 0.
         max_blocks = cfg.max_num_seqs * self.max_blocks_per_seq + 1
-        budget = int(total * cfg.gpu_memory_utilization) - other - peak
-        num_blocks = min(budget // bytes_per_block, max_blocks)
+        budget = memory.kv_cache_budget(
+            total, cfg.gpu_memory_utilization, other, peak
+        )
+        num_blocks = memory.num_blocks(budget, bytes_per_block, max_blocks)
 
         if num_blocks < 2:
             raise RuntimeError(
@@ -149,7 +147,9 @@ class ModelRunner:
         for layer in self.model.layers:
             attn = getattr(layer, "self_attn", None) or getattr(layer, "attn", None)
             if attn is not None:
-                attn.kv_cache = torch.zeros(shape, dtype=cfg.dtype, device=device)
+                attn.kv_cache = torch.zeros(
+                    shape, dtype=cfg.dtype, device=device
+                )
 
         print(
             f"[miniserve] KV Cache: {num_blocks} blocks x {cfg.block_size} tokens "
@@ -167,9 +167,9 @@ class ModelRunner:
 
         # packed streams we will copy onto the GPU buffers
         ids, pos, slots, logit_rows = [], [], [], []
-        qsl, seq_lens = [0], []  # qsl starts at 0 , we append the rest
+        qsl, seq_lens = [0], []  # qsl starts at 0, we append the rest
 
-        # page table for real + dummy rows, max block need possibly for a single sequence
+        # page table for real + dummy rows
         bt = np.zeros(
             (max(len(batch), pad_to), self.max_blocks_per_seq), dtype=np.int32
         )
@@ -177,16 +177,15 @@ class ModelRunner:
         for i, s in enumerate(batch):
             start, n = s.num_computed, s.num_new
             p = np.arange(start, start + n)
-            blocks = np.asarray(s.req_block_ids)
+            blocks = np.asarray(s.req.block_ids, dtype=np.int32)
 
-            # now store the metadata information back to the vars that we defined
-
-            # 1.pack together each batch into a single stream
+            # 1. pack together each batch into a single stream
             ids.extend(s.req.token_ids[start : start + n])  # packed input ids
-            # position embeds restart from 0 fro every sample
-            pos.extend(p.tolist())  # RoPE/ Causal positions
+            # positions restart from 0 for every sample
+            pos.extend(p.tolist())  # RoPE / causal positions
 
-            # slot = page * bs + offset , destination of index_copy_ for each new token
+            # slot = page * bs + offset, destination of index_copy_ for each
+            # new token
             slots.extend((blocks[p // bs] * bs + p % bs).tolist())
 
             # request i owns q[qsl[i]:qsl[i+1]]
@@ -195,7 +194,7 @@ class ModelRunner:
             seq_lens.append(start + n)
             # page-table row
             bt[i, : len(blocks)] = blocks
-            # last packed row -> grab the actual rows that we will grab to project the softmax
+            # last packed row -> the rows we project through the LM head
             logit_rows.append(qsl[-1] - 1)
 
         for _ in range(len(batch), pad_to):
@@ -208,17 +207,17 @@ class ModelRunner:
         T, B = len(ids), len(seq_lens)
         # now need to write this to persistent buffers
         # fixed addresses for CUDA graphs
-        self.input_ids[:T].copy_(torch.tensor(ids))
-        self.positions[:T].copy_(torch.tensor(pos))
-        self.slot_mapping[:T].copy_(torch.tensor(slots))
-        self.query_start_loc[: B + 1].copy_(torch.tensor(qsl))
+        self.input_ids[:T].copy_(torch.tensor(ids, dtype=torch.int64))
+        self.positions[:T].copy_(torch.tensor(pos, dtype=torch.int64))
+        self.slot_mapping[:T].copy_(torch.tensor(slots, dtype=torch.int64))
+        self.query_start_loc[: B + 1].copy_(torch.tensor(qsl, dtype=torch.int32))
         self.cu_seqlens_k[: B + 1].copy_(
-            torch.tensor([0] + np.cumsum(seq_lens).tolist())
+            torch.tensor([0] + np.cumsum(seq_lens).tolist(), dtype=torch.int32)
         )
         self.block_table[:B].copy_(torch.from_numpy(bt))
 
         # build the attn metadata
-        max_seq = self.cfg.max_model_len if forward_graph else max(seq_lens)
+        max_seq = self.cfg.max_model_len if forward_graph else max(seq_lens or [1])
 
         meta = AttnMetadata(
             self.slot_mapping[:T],
@@ -236,48 +235,41 @@ class ModelRunner:
 
     @torch.inference_mode()
     def graph_sizes(self):
-        # decode the graph bucket sizes, finegrained at bottom (1,2,4)
-        # where small batches are common, then every 8 upto max_num_seqs
-        # a live batch of N picks the smallest bucket >=N and pads the rest with dummy 1
-        # token requests on the null page
+        # decode graph bucket sizes: fine-grained at the bottom (1,2,4) where
+        # small batches are common, then every 8 up to max_num_seqs
         max_seqs = self.cfg.max_num_seqs
-        # the largest bucket must be >= max_seqs, otherwise a full batch has
-        # no graph to replay (e.g. max_seqs=20 with buckets 8,16)
         sizes = sorted({1, 2, 4, max_seqs} | set(range(8, max_seqs + 1, 8)))
         return [s for s in sizes if s <= max_seqs]
 
     @torch.inference_mode()
     def capture_cuda_graphs(self):
-        # what cuda graphs does it , is that it caputures the grpahs
         t = time.time()
 
-        # start with the worst case scenario cuda graphs and make the others share
-        # the same chunk of memory of the CUDA graphs , and use smaller chunks o the same pool
-        #
+        # start with the worst case and let the smaller graphs share its pool
         pool = torch.cuda.graph_pool_handle()
 
         for batch_size in reversed(self.graph_sizes()):
             T, meta, _ = self._prepare([], pad_to=batch_size, forward_graph=True)
 
-            # the layers read the descriptor back through the context var, so the
-            # capture has to run inside the same binding as the warmup pass
+            # the layers read the descriptor back through the context var, so
+            # the capture has to run inside the same binding as the warmup pass
             with set_forward_context(meta):
                 self.model(self.input_ids[:T], self.positions[:T])
                 g = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(g, pool=pool):
                     out = self.model(self.input_ids[:T], self.positions[:T])
 
-            # this cuda graph take the buffers that we defined in 206-211
-            # and write to this specific output locations in out
+            # this graph reads the buffers defined above and writes to `out`
             self.graphs[batch_size] = (g, out)
 
         print(
-            f"[miniserve] captured ({len(self.graphs)}) decode CUDA graphs in ({time.time() - t:.2f}) s."
+            f"[miniserve] captured ({len(self.graphs)}) decode CUDA graphs "
+            f"in ({time.time() - t:.2f}) s."
         )
 
     @torch.inference_mode()
     def run(self, batch):
-        # if everything is decoding, that means we are done
+        # if every request is decoding, we can use a captured graph
         is_decode = all(s.num_new == 1 for s in batch)
 
         size = next((s for s in self.graph_sizes() if s >= len(batch)), None)
@@ -294,4 +286,21 @@ class ModelRunner:
                 hidden = self.model(self.input_ids[:T], self.positions[:T])
 
         logits = self.model.logits(hidden[rows])
-        return sample(logits, [s.req.params for s in batch]), logits
+
+        # teacher forcing: each request may force the token at its current
+        # generation index; None means sample normally
+        forced = []
+        for s in batch:
+            p = s.req.params
+            step = len(s.req.output_ids)
+            if p.forced_token_ids and step < len(p.forced_token_ids):
+                forced.append(p.forced_token_ids[step])
+            else:
+                forced.append(None)
+
+        tokens = sample(
+            logits,
+            [s.req.params for s in batch],
+            token_ids=forced if any(f is not None for f in forced) else None,
+        )
+        return tokens, logits

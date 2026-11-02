@@ -52,6 +52,7 @@ def load_model(
     tp_size: int = 1,
     expert_parallel: bool = False,
     device=None,
+    attn_fn=None,
 ):
     # a utility function to load weights into our model (this rank's shard of them)
     path = (
@@ -69,7 +70,7 @@ def load_model(
     device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
     torch.set_default_dtype(dtype)
     with torch.device(device):
-        model = Model(cfg, max_position)
+        model = Model(cfg, max_position, attn_fn=attn_fn)
 
     torch.set_default_dtype(torch.float32)
     params = dict(model.named_parameters())

@@ -1,11 +1,10 @@
-# import warnings
+import warnings
 from dataclasses import dataclass
 from typing import Literal
 
 # some basic configurations of things
 import torch
 
-# from miniserve.attention.backends import flash_attn_available
 from miniserve.platform import resolve_device
 
 
@@ -41,21 +40,26 @@ class EngineConfig:
             else:
                 self.dtype = torch.float32
 
-        if self.device.type != "cuda":
-            self.attention_backend = "torch"
-            self.use_cuda_graphs = False
-        else:
-            #             if self.attention_backend == "auto":
-            #                 self.attention_backend = (
-            #                     "flash_attn" if flash_attn_available() else "torch"
-            #                 )
-            #
-            #             if self.attention_backend == "flash_attn" and not flash_attn_available():
-            #                 warnings.warn("FlashAttention unavailable; using torch attention")
-            #                 self.attention_backend = "torch"
+        if self.attention_backend == "auto":
+            # SDPA is the fast path on both CUDA and MPS. The torch reference
+            # is only the default on CPU, where it is easier to debug.
+            self.attention_backend = (
+                "torch" if self.device.type == "cpu" else "sdpa"
+            )
 
-            if self.attention_backend == "torch":
-                self.use_cuda_graphs = False
-            else:
-                # the paged kernel reads much larger pages than the reference path
-                self.block_size = 256
+        if self.attention_backend == "flash_attn":
+            warnings.warn("FlashAttention is not available in this build; using sdpa")
+            self.attention_backend = "sdpa"
+
+        if self.device.type != "cuda":
+            self.use_cuda_graphs = False
+        elif self.attention_backend == "torch":
+            # the reference backend has a Python loop per request, so there is
+            # nothing stable to capture
+            self.use_cuda_graphs = False
+
+        if self.max_num_batched_tokens < self.max_num_seqs:
+            raise ValueError(
+                "max_num_batched_tokens must be at least max_num_seqs "
+                "(every running request needs at least one token per step)"
+            )

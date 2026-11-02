@@ -28,6 +28,7 @@ class Scheduler:
         self.kv = kv
         self.waiting: deque[Request] = deque()  # FIFO of not yet admitted requests
         self.running: list[Request] = []  # currently holding KV pages
+        self.preemptions = 0
 
     def add(self, req: Request):
         self.waiting.append(req)
@@ -42,6 +43,7 @@ class Scheduler:
         self.kv.free_request(victim)
         victim.num_computed_tokens = 0
         self.waiting.appendleft(victim)
+        self.preemptions += 1
         return victim
 
     def schedule(self) -> list[ScheduledRequest]:
