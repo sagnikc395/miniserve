@@ -233,3 +233,58 @@ Server-side metrics exclude tokenization in the HTTP handler, network, and SSE f
 Grafana is best for watching a live server. For comparing benchmark runs side by side (prefix cache on vs off, block size 16 vs 32, speculation on vs off), the JSONL files plus a small plotting script or notebook are usually clearer: latency CDFs per run, and throughput vs p95 TPOT curves as you sweep the request rate. Those curves are the standard way to compare serving configurations, since any engine can look good at one load level.
 
 Finally, the unit test for `timing.py` is worth writing early: drive a `RequestTimes` with a fake clock through admit, preempt, readmit, three tokens, and finish, and assert queue time, TTFT, TPOT and ITL values exactly.
+## 8. Learning resources
+
+Roughly the order worth reading them in. The sections above are the plan; these explain why it is shaped that way.
+
+### Prometheus data model
+
+What trips people up is not Grafana, it is understanding why counters plus `rate()` behave the way they do.
+
+- [Metric types](https://prometheus.io/docs/concepts/metric_types/) — counter vs gauge vs histogram vs summary. Short, and the vocabulary everything else assumes.
+- [Histograms and summaries](https://prometheus.io/docs/practices/histograms/) — the most important page for this use case. Why `histogram_quantile` over bucket counters is an approximation, why bucket edges must be chosen up front, and why you cannot average quantiles across instances.
+- [How does a Prometheus histogram work?](https://www.robustperception.io/how-does-a-prometheus-histogram-work/) — Brian Brazil's blog. The whole archive is the best Prometheus writing available; also read his posts on `rate()` extrapolation and on cardinality.
+- [Metric and label naming](https://prometheus.io/docs/practices/naming/) — the `_seconds` and `_total` suffixes used in §4 come from here.
+- [Native histograms](https://prometheus.io/docs/specs/native_histograms/) — exponential, auto-scaling buckets, an alternative to the fixed edges in §4. Worth knowing it exists before hand-tuning TTFT and ITL buckets, though the classic buckets are the safer default for now.
+
+### PromQL
+
+- [Querying basics](https://prometheus.io/docs/prometheus/latest/querying/basics/), then [functions](https://prometheus.io/docs/prometheus/latest/querying/functions/). Focus on `rate`, `irate`, `increase`, `sum by`, `histogram_quantile`.
+- [PromLabs PromQL cheat sheet](https://promlabs.com/promql-cheat-sheet/) — they also have a free interactive "Must-Know PromQL" course.
+
+The mental model to internalise: `rate()` needs a window of at least 4x the scrape interval, and `sum by (le) (rate(..._bucket[...]))` is the fixed incantation for percentiles. The queries in §6 are correct; knowing why they are shaped that way is what makes an empty panel quick to debug.
+
+### prometheus_client
+
+- [client_python docs](https://prometheus.github.io/client_python/) — `Counter`/`Gauge`/`Histogram`/`Info`, `generate_latest`, the ASGI app, and the multiprocess mode caveats. Those caveats matter if uvicorn ever runs with more than one worker, since gauges stop making sense.
+
+### Grafana
+
+- [Dashboards](https://grafana.com/docs/grafana/latest/dashboards/) — panels, variables, transformations.
+- [Provisioning](https://grafana.com/docs/grafana/latest/administration/provisioning/) — the authority on the datasource and dashboard YAML format used in §5.
+- [Heatmap panel](https://grafana.com/docs/grafana/latest/panels-visualizations/visualizations/heatmap/) — specifically the heatmap-from-histogram-buckets mode that the prompt length distribution panel needs. Easy to get wrong.
+- [Variables](https://grafana.com/docs/grafana/latest/dashboards/variables/) — for the `model_name` template variable.
+- [play.grafana.org](https://play.grafana.org) — live sandbox with real data. The fastest way to learn panel options is to edit an existing panel and read its JSON.
+
+Hand-writing dashboard JSON is miserable and the schema is undocumented in practice, so build in the UI and export from Dashboard settings → JSON Model.
+
+### LLM serving metrics
+
+Where the generic observability material stops helping.
+
+- [vLLM metrics design doc](https://docs.vllm.ai/en/latest/design/metrics.html) — the design rationale for the metric set §4 replicates, including what they chose not to measure and which metrics were dropped between v0 and v1.
+- vLLM's Grafana example, in the repo under `examples/online_serving/prometheus_grafana/` — the path has moved between releases, so search the repo for `grafana.json` if it 404s. Ships a working compose file, Prometheus config and dashboard JSON. Cloning that JSON and rewriting `vllm:` to `miniserve_` in the queries is a much faster start than building panels from scratch.
+- vLLM's `benchmarks/benchmark_serving.py` — the reference implementation of the load generator described in §7: Poisson arrivals, per-request TTFT/ITL/TPOT, percentile reporting. Read it before writing `benchmarks/load.py`; the arrival process and warmup details matter.
+- Gil Tene, [How NOT to Measure Latency](https://www.youtube.com/watch?v=lJ8ydIuPFeU) — 45 minutes, and the best time available to spend on this. Coordinated omission is why naive load generators report latencies that are too good, and it bites hard when driving load at a fixed concurrency rather than a fixed arrival rate.
+- [Brendan Gregg, the USE method](https://www.brendangregg.com/usemethod.html) — utilisation, saturation, errors as a checklist for what to instrument. The running and waiting gauges and KV usage are the saturation signals; this frames why.
+
+### Longer form
+
+- *Prometheus: Up & Running*, Brian Brazil, O'Reilly, 2nd ed. 2023 — one coherent pass instead of scattered pages.
+- Google SRE book, [ch. 6, Monitoring Distributed Systems](https://sre.google/sre-book/monitoring-distributed-systems/) — free online. Signals vs causes, and why distributions beat averages.
+
+### A path through it
+
+Histogram practices, then the PromQL cheat sheet, then stand up the compose stack in §5 against a hardcoded `/metrics`, then clone vLLM's dashboard JSON and adapt it. Read the vLLM design doc and Tene's talk before trusting any number the stack produces.
+
+The constraint that shapes the schema, repeating §6 because it is the expensive one to get wrong: Prometheus histograms cannot be correlated with each other after the fact. Any breakdown of TTFT by prompt size needs the label added at record time, and deciding label sets early is cheaper than migrating them later.
