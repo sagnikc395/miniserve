@@ -1,8 +1,7 @@
-from miniserve.attention.backends import ATTENTION_BACKENDS
-from miniserve.attention.forward_context import ATTN_METADATA, set_forward_context
+from miniserve.attention.forward_context import set_forward_context
 from miniserve.model.loader import load_model
+from miniserve.model.sampling import sample
 from miniserve.platform import device_memory
-from numpy._core.fromnumeric import _2D
 import torch
 import numpy as np
 from miniserve.attention.metadata import AttnMetadata
@@ -20,7 +19,9 @@ class ModelRunner:
         torch.manual_seed(cfg.seed)
 
         # load the model
-        self.model = load_model(cfg.model, cfg.dtype, cfg.max_model_len)
+        self.model = load_model(
+            cfg.model, cfg.dtype, cfg.max_model_len, device=self.device
+        )
 
         # get the model config
         mc = self.model.cfg
@@ -40,9 +41,8 @@ class ModelRunner:
         N, S = cfg.max_num_batched_tokens, cfg.max_num_seqs
 
         # helper method to create an input with a given shape
-        z = lambda *shape, dt=torch.int32: torch.zeros(
-            *shape, dtype=dt, device=self.device
-        )
+        def z(*shape, dt=torch.int32):
+            return torch.zeros(*shape, dtype=dt, device=self.device)
 
         # create some dummy inuts to act as our buffer
         # when we are decoding , leverage the CUDA graph
@@ -55,9 +55,7 @@ class ModelRunner:
         # a place to store the graphs : ("decode", batch_size) or ("mixed",token count)
         # acts like a replay graph
         # instead of capture every cuda graph at some granular level and then pad our data when we are decoding
-        self.graphs: dict[
-            tuple[str, int], tuple[torch.cuda.CUDAGraph, torch.Tensor]
-        ] = {}
+        self.graphs: dict[int, tuple[torch.cuda.CUDAGraph, torch.Tensor]] = {}
 
         # last step's sampled token ids.
         # stay on th GPU (next step's inut ids copied from here) and also go to pinned host memory
@@ -162,7 +160,7 @@ class ModelRunner:
         self.num_blocks = num_blocks
         return num_blocks
 
-    def _prepare(self, batch, pad_to, forward_graph=False):
+    def _prepare(self, batch, pad_to=0, forward_graph=False):
         # all the metadata that we need to write
 
         bs = self.cfg.block_size
@@ -251,9 +249,6 @@ class ModelRunner:
     @torch.inference_mode()
     def capture_cuda_graphs(self):
         # what cuda graphs does it , is that it caputures the grpahs
-        #
-        global ATTN_META
-
         t = time.time()
 
         # start with the worst case scenario cuda graphs and make the others share
@@ -261,39 +256,42 @@ class ModelRunner:
         #
         pool = torch.cuda.graph_pool_handle()
 
-        for batch_size in reverse(self.graph_sizes()):
+        for batch_size in reversed(self.graph_sizes()):
             T, meta, _ = self._prepare([], pad_to=batch_size, forward_graph=True)
-            ATTN_META = meta
 
-            self.model(self.input_ids[:T], self.positions[:T])
-            with torch.cuda.graph(g, pool=pool):
-                out = self.model(self.input_ids[:T], self.positions[:T])
+            # the layers read the descriptor back through the context var, so the
+            # capture has to run inside the same binding as the warmup pass
+            with set_forward_context(meta):
+                self.model(self.input_ids[:T], self.positions[:T])
+                g = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(g, pool=pool):
+                    out = self.model(self.input_ids[:T], self.positions[:T])
 
             # this cuda graph take the buffers that we defined in 206-211
             # and write to this specific output locations in out
             self.graphs[batch_size] = (g, out)
 
         print(
-            f"[miniserve] captured ({len(self.graphs)}) decode CUDA graphs in ({time.time() - t:._2Df}) s."
+            f"[miniserve] captured ({len(self.graphs)}) decode CUDA graphs in ({time.time() - t:.2f}) s."
         )
 
     @torch.inference_mode()
     def run(self, batch):
-        global ATTN_META
-
         # if everything is decoding, that means we are done
         is_decode = all(s.num_new == 1 for s in batch)
 
         size = next((s for s in self.graph_sizes() if s >= len(batch)), None)
 
         if self.graphs and is_decode and size is not None:
-            T, ATTN_META, rows = self._prepare(batch, pad_to=size, forward_graph=True)
+            T, meta, rows = self._prepare(batch, pad_to=size, forward_graph=True)
             graph, out = self.graphs[size]
-            graph.replay()
+            with set_forward_context(meta):
+                graph.replay()
             hidden = out
         else:
-            T, ATTN_META, rows = self._prepare(batch)
-            hidden = self.model(self.input_ids[:T],self.positions[:T])
+            T, meta, rows = self._prepare(batch)
+            with set_forward_context(meta):
+                hidden = self.model(self.input_ids[:T], self.positions[:T])
 
         logits = self.model.logits(hidden[rows])
-        return sample(logits,[s.req.params for s in batch]), logits
+        return sample(logits, [s.req.params for s in batch]), logits

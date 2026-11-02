@@ -23,5 +23,15 @@ def rotary(x, cos, sin):
     return torch.cat([x1 * cos - x2 * sin, x2 * cos + x1 * sin], -1).to(x.dtype)
 
 
+def add_rmsnorm(norm, x, residual):
+    # fused residual add + RMSNorm: the first layer has no residual yet, every
+    # later one folds the incoming stream in before normalising.
+    # returns (normalised activations, the residual stream to carry forward)
+    if residual is None:
+        return norm(x), x
+    residual = residual + x
+    return norm(residual), residual
+
+
 class DecoderLayer(nn.Module):
     pass

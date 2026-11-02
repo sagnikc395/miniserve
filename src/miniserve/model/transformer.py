@@ -1,5 +1,5 @@
 import torch
-from miniserve.model.layers import RMSNorm, DecoderLayer
+from miniserve.model.layers import RMSNorm, DecoderLayer, add_rmsnorm
 from torch import nn
 
 

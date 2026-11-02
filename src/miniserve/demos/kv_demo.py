@@ -80,7 +80,7 @@ def demo() -> None:
     print(
         f"  page {shared} survives: ref_cnt = {kv.ref_cnt[shared]}, free = {list(kv.free)}"
     )
-    print(f"  'a' tail pages went back to the LRU queue but keep their hashes,")
+    print("  'a' tail pages went back to the LRU queue but keep their hashes,")
     print("  so a third copy of the same prompt would still hit them")
 
     banner("6. The pool runs dry")

@@ -2,7 +2,7 @@ import torch
 from miniserve.sampling import SamplingParams
 
 
-def sample(logits, params: list[SamplingParams], token_ids):
+def sample(logits, params: list[SamplingParams], token_ids=None):
     # a batched call for mixed sampling settings
     # logits : B * V
     # greedy decoding -> logits.argmax(axis=-1)
@@ -19,7 +19,7 @@ def sample(logits, params: list[SamplingParams], token_ids):
 
     V = logits.shape[-1]
 
-    top_k = torch.tensor([p.top_k if p.top_k > 0 else v for p in params], device=dev)
+    top_k = torch.tensor([p.top_k if p.top_k > 0 else V for p in params], device=dev)
     top_p = torch.tensor([p.top_p for p in params], device=dev)
 
     # sort logits by most likely to least likely
@@ -29,7 +29,7 @@ def sample(logits, params: list[SamplingParams], token_ids):
     probs = sorted_logits.softmax(axis=1)
 
     # drop a sorted position if it fails a top p or top k
-    drop = (ranks >= top_k[:, None]) | (probs.cumsum[-1] - probs > top_p[:, None])
+    drop = (ranks >= top_k[:, None]) | (probs.cumsum(-1) - probs > top_p[:, None])
     # the specific positions will be zeroed out
     sorted_logits = sorted_logits.masked_fill(drop, float("-inf"))
 
