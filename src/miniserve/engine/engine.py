@@ -102,3 +102,29 @@ class Engine:
 
     def has_work(self):
         return self.scheduler.has_work()
+
+    def step(self):
+        batch = self.scheduler.schedule()
+        if not batch:
+            return []
+        tokens, logits = self.runner.run(batch)
+
+        outputs = []
+        for i,(s,tok) in enumerate(zip(batch,tokens)):
+            req = s.req
+
+            # chunked prefill that stops mid-prompt, we wrote k/v for those tokens
+            # but the last position is not the next output token, so we throw these samples away
+            if not s.completes_prompt:
+                continue
+
+            req.token_ids.append(tok)
+            n_out = len(req.output_ids)
+
+            # stop condition for us
+            # 1. either we genreate an eos token
+            # 2. or we ran out of token space
+            if tok in self.stop_ids and not req.params.ignore_eos:
+                self.scheduler.finish(req,"stop")
+            elif n_out >= req.params.max_tokens or req.num_tokens >= self.cfg.max_model_len:
+                self.scheduler.finish(req,"length")
