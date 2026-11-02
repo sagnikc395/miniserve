@@ -1,10 +1,13 @@
 from miniserve.attention.backends import ATTENTION_BACKENDS
-from miniserve.attention.forward_context import set_forward_context
+from miniserve.attention.forward_context import ATTN_METADATA, set_forward_context
 from miniserve.model.loader import load_model
 from miniserve.platform import device_memory
+from numpy._core.fromnumeric import _2D
 import torch
 import numpy as np
 from miniserve.attention.metadata import AttnMetadata
+import time
+
 
 class ModelRunner:
     # turns the schedulers decisions into GPU tensors
@@ -223,3 +226,42 @@ class ModelRunner:
         )
 
         return T, meta, logit_rows
+
+    @torch.inference_mode()
+    def graph_sizes(self):
+        # decode the graph bucket sizes, finegrained at bottom (1,2,4)
+        # where small batches are common, then every 8 upto max_num_seqs
+        # a live batch of N picks the smallest bucket >=N and pads the rest with dummy 1
+        # token requests on the null page
+        max_seqs = self.cfg.max_num_seqs
+        # the largest bucket must be >= max_seqs, otherwise a full batch has
+        # no graph to replay (e.g. max_seqs=20 with buckets 8,16)
+        sizes = sorted({1, 2, 4, max_seqs} | set(range(8, max_seqs + 1, 8)))
+        return [s for s in sizes if s <= max_seqs]
+
+    @torch.inference_mode()
+    def capture_cuda_graphs(self):
+        # what cuda graphs does it , is that it caputures the grpahs
+        #
+        global ATTN_META
+
+        t = time.time()
+
+        # start with the worst case scenario cuda graphs and make the others share
+        # the same chunk of memory of the CUDA graphs , and use smaller chunks o the same pool
+        #
+        pool = torch.cuda.graph_pool_handle()
+
+        for batch_size in reverse(self.graph_sizes()):
+            T, meta, _ = self._prepare([],pad_to=batch_size,forward_graph=True)
+            ATTN_META = meta
+
+            self.model(self.input_ids[:T],self.positions[:T])
+            with torch.cuda.graph(g,pool=pool):
+                out = self.model(self.input_ids[:T],self.positions[:T])
+
+            # this cuda graph take the buffers that we defined in 206-211
+            # and write to this specific output locations in out
+            self.graphs[batch_size] = (g,out)
+
+        print(f"[miniserve] captured ({len(self.graphs)}) decode CUDA graphs in ({time.time() - t:._2Df}) s.")
