@@ -40,6 +40,7 @@ class ModelRunner:
         self.block_table = z(S, self.max_blocks_per_seq)
 
         # a place to store the graphs : ("decode", batch_size) or ("mixed",token count)
+        # acts like a replay graph
         self.graphs: dict[tuple[str,int],tuple[torch.cuda.CUDAGraph,torch.Tensor]] = {}
 
         # last step's sampled token ids.
