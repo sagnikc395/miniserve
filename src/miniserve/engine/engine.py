@@ -1,5 +1,11 @@
 from dataclasses import dataclass
+from miniserve.core.kv_cache import KVCacheManager
 import torch
+from transformers.generation.configuration_utils import GenerationConfig
+from transformers.models.auto.tokenization_auto import AutoTokenizer
+from miniserve.runner.model_runner import ModelRunner
+from miniserve.core.scheduler import Scheduler
+from miniserve.core.sequence import Request
 
 
 @dataclass(slots=True)
@@ -45,3 +51,33 @@ class Detokenizer:
         self.text += delta
         self.prefix, self.read = self.read, len(ids)
         return delta
+
+class Engine:
+    def __init__(self,cfg):
+        self.cfg = cfg
+        self.tokenizer = AutoTokenizer.from_pretrained(cfg.model)
+        self.stop_ids = {self.tokenizer.eos_token_id}
+
+        # some model could have multiple stop ids so just incase we make a list
+        try:
+            eos = GenerationConfig.from_pretrained(cfg.model).eos_token_id
+            self.stop_ids |= set(eos if isinstance(eos,list) else [eos])
+        except Exception:
+            pass
+
+        # if none is in here so just remove it
+        self.stop_ids.discard(None)
+
+        # set up runner
+        self.runner = ModelRunner(cfg)
+        num_blocks = self.runner.allocate_kv_cache()
+        if cfg.use_cuda_graphs:
+            self.runner.capture_cuda_graphs()
+
+        # setup the kv cache and the scheduler
+        self.kv = KVCacheManager(num_blocks,cfg.block_size,cfg.enable_prefix_caching)
+        self.scheduler = Scheduler(cfg,self.kv)
+
+        # setup storage for the rest
+        self.detok: dict[str,Detokenizer] = {}
+        self.requests: dict[str,Request] = {}
