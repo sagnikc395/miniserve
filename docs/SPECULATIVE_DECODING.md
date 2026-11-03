@@ -18,7 +18,7 @@ These are the places where the current code assumes exactly one new token per se
 
 5. **Sampler interface.** Have it accept target logits `[B, k+1, V]` plus optional draft probabilities. Greedy acceptance is "accept while argmax matches the draft". For temperature > 0, use the rejection rule from the paper: accept draft token x with probability min(1, p(x)/q(x)), otherwise resample from the normalised max(0, p - q). This preserves the target model's output distribution exactly.
 
-6. **A `Proposer` interface** in `src/miniserve/spec/`:
+6. **A `Proposer` interface** in `miniserve/spec/`:
 
    ```python
    class Proposer(Protocol):

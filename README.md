@@ -1,20 +1,23 @@
 ## miniserve 
 
-A tiny vLLM implementation, to serve models at scale.
-This uses a simplified implementation of 
+A mini vLLM implementation trying to learn how vLLM serves models at scale.
+Main things that I implement in this are:
 - Paged KV Cached with prefix caching
-- Continuous batching with chunked prefill, 
-- SDPA(Flash Attention is CUDA dependent) , 
+- Continuous batching with chunked prefill 
+- SDPA(Flash Attention is CUDA dependent)
 
 
 ### Commands
 
-Everything runs through one CLI: `python main.py <command>` from the repository
-root, or `miniserve <command>` after `uv sync`.
+Everything runs through one CLI: `uv run main.py <command>` from the repository
+root. The repository is used without installing `miniserve` itself — `uv sync`
+only installs third-party dependencies, and tests/demos import the code straight
+out of the tree.
 
 ```bash
-uv sync                      # install
-python main.py --help        # serve | generate | bench | attn-demo | kv-demo
+uv venv                  # create the virtual env
+uv sync                  # install dependencies
+uv run main.py --help    # serve | generate | bench | attn-demo | kv-demo
 ```
 
 `serve`, `generate` and `bench` share the engine flags:
@@ -36,7 +39,7 @@ python main.py --help        # serve | generate | bench | attn-demo | kv-demo
 **serve** — OpenAI-compatible HTTP server:
 
 ```bash
-python main.py serve --model Qwen/Qwen3-0.6B --port 8000
+uv run main.py serve --model Qwen/Qwen3-0.6B --port 8000
 ```
 
 ```bash
@@ -54,8 +57,8 @@ curl localhost:8000/v1/chat/completions -H 'content-type: application/json' -d '
 **generate** — one prompt, no server:
 
 ```bash
-python main.py generate -p "explain paged attention" --chat --max-tokens 128
-python main.py generate -p "2 + 2 =" --temperature 0.7 --top-p 0.9 --no-stream
+uv run main.py generate -p "explain paged attention" --chat --max-tokens 128
+uv run main.py generate -p "2 + 2 =" --temperature 0.7 --top-p 0.9 --no-stream
 ```
 
 ### Chat UI
@@ -67,13 +70,13 @@ model, the KV cache and the device to itself. It streams
 token and how much of each prompt the prefix cache served.
 
 ```bash
-python main.py serve --model Qwen/Qwen3-0.6B   # one terminal
-python tui.py                                  # another terminal
+uv run main.py serve --model Qwen/Qwen3-0.6B   # one terminal
+uv run tui.py                                  # another terminal
 
 # or let the ui own the server and stop it again on exit
-python tui.py --spawn --model HuggingFaceTB/SmolLM2-135M-Instruct
-python tui.py --spawn --serve-args='--device cpu --max-num-seqs 4'
-python tui.py --base-url http://127.0.0.1:8000 --max-tokens 256 --temperature 0.2
+uv run tui.py --spawn --model HuggingFaceTB/SmolLM2-135M-Instruct
+uv run tui.py --spawn --serve-args='--device cpu --max-num-seqs 4'
+uv run tui.py --base-url http://127.0.0.1:8000 --max-tokens 256 --temperature 0.2
 ```
 
 With `--spawn` the server runs as a child process, its log goes to
@@ -92,17 +95,17 @@ requests are submitted.
 
 ```bash
 # default: 16 prompts, 64 new tokens each, both miniserve arms
-python main.py bench
+uv run main.py bench
 
 # add the Hugging Face baseline, and push the engine harder
-python main.py bench --hf-baseline --num-prompts 64 --max-tokens 128
+uv run main.py bench --hf-baseline --num-prompts 64 --max-tokens 128
 
 # small and quick, useful while changing the scheduler
-python main.py bench --model HuggingFaceTB/SmolLM2-135M-Instruct \
+uv run main.py bench --model HuggingFaceTB/SmolLM2-135M-Instruct \
   --num-prompts 8 --max-tokens 16 --max-num-seqs 4 --max-num-batched-tokens 512
 
 # isolate a backend or the paged-cache path
-python main.py bench --attention-backend torch --device cpu
+uv run main.py bench --attention-backend torch --device cpu
 ```
 
 | column | meaning |
@@ -114,15 +117,15 @@ python main.py bench --attention-backend torch --device cpu
 | `p50 / p90 lat` | end-to-end latency per request, measured from submission |
 | `cached` | share of prompt tokens served from the prefix cache |
 
-The prompt set lives in `src/miniserve/benchmarks/prompts.py`: a deterministic mix
+The prompt set lives in `miniserve/benchmarks/prompts.py`: a deterministic mix
 of short and long instructions behind a shared system prompt, rendered through the
 model's chat template, so prefix caching has something real to hit. The baseline
 also reports `padded_prompt_tokens` in its result dict, which is the padding waste
 static batching pays and continuous batching does not.
 
 ```bash
-python main.py attn-demo    # compare paged attention backends on a toy pool
-python main.py kv-demo      # step through the KV cache manager by hand
+uv run main.py attn-demo    # compare paged attention backends on a toy pool
+uv run main.py kv-demo      # step through the KV cache manager by hand
 uv run pytest               # test suite
 ```
 

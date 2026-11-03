@@ -3,7 +3,7 @@ Yes. The standard way is the same one vLLM uses: the engine records per-request 
 ## 1. Where it lives in the layout
 
 ```
-src/miniserve/
+miniserve/
   metrics/
     __init__.py
     timing.py          # RequestTimes dataclass + derived metrics (pure Python)

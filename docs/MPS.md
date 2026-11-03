@@ -427,13 +427,10 @@ Only call `flash_attention()` when FlashAttention is actually available; otherwi
 
 ## 6. Start with a small model
 
-Do not install `flash-attn` on macOS. Install only the regular dependencies:
-
-```bash
-python3 -m pip install -U \
-  torch transformers datasets huggingface_hub safetensors \
-  fastapi uvicorn pandas numpy openai
-```
+Do not install `flash-attn` on macOS. `uv sync` from the repository root installs
+all the dependencies the project actually uses (torch, transformers,
+huggingface-hub, safetensors, fastapi, uvicorn, numpy) plus the dev group, and
+nothing else.
 
 Check MPS:
 

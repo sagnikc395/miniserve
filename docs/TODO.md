@@ -10,10 +10,10 @@ Measurements below were taken on: M4, 24 GB, macOS 26.5, torch 2.14.1, Python 3.
 
 | Path | Status |
 |---|---|
-| `python main.py attn-demo` | works, matches naive attention to ~2e-7 |
-| `python main.py kv-demo` | works |
+| `uv run main.py attn-demo` | works, matches naive attention to ~2e-7 |
+| `uv run main.py kv-demo` | works |
 | `pytest tests` | 10 passed (all `KVCacheManager`) |
-| `python main.py serve` / `generate` / `bench` | `ClickException("not implemented yet")` |
+| `uv run main.py serve` / `generate` / `bench` | `ClickException("not implemented yet")` |
 | anything that loads a real checkpoint | blocked on section 5 |
 
 `core/` (scheduler, KV cache manager, sequence) and `attention/` are the two layers that
@@ -25,7 +25,7 @@ look finished. Everything from `DecoderLayer` upward is partial or empty.
 
 ## 1. The `sdpa` backend is an alias, and unreachable on Mac
 
-`paged_sdpa_attention()` in `src/miniserve/attention/paged_sdpa.py` returns
+`paged_sdpa_attention()` in `miniserve/attention/paged_sdpa.py` returns
 `torch_ref_attention` — the same object the `torch` backend returns. The registry holds
 two names for one implementation:
 
@@ -120,7 +120,7 @@ done.
   `ModelRunner.allocate_kv_cache` reaches in via
   `getattr(layer, "self_attn", None) or getattr(layer, "attn", None)` to hang the KV
   tensor on it.
-- **No MLP at all.** No `MLP`, `MoE` or `gate_up_proj` class exists anywhere in `src/`.
+- **No MLP at all.** No `MLP`, `MoE` or `gate_up_proj` class exists anywhere in the package.
 - **The loader and the model disagree about weight layout.** `loader.py` resolves
   checkpoint keys against a *fused* model — it looks up `module.qkv_sizes`,
   `module.qkv_proj`, `module.gate_up_sizes`, `module.gate_up_proj`, and
@@ -215,9 +215,10 @@ regress silently, especially before touching Part A items 2-4.
   `"torch"`). Either restore the auto-resolution or drop `"auto"` from the `Literal`.
 - **`config.py`** — `kv_layout` and `decode_backend` are declared and never read by
   anything. `kv_layout` ties into Part A item 3.
-- **`pyproject.toml`** — `description = "Add your description here"`, and there is no
-  `[project.scripts]` entry, so the CLI only runs as `python main.py`.
-- **`src/miniserve/__init__.py`** and most package `__init__.py` files are empty — fine,
+- **`pyproject.toml`** — `[project.scripts]` declares a `miniserve` console script,
+  but there is no `[build-system]`, so the package is never installed and the CLI
+  only runs as `python main.py`.
+- **`miniserve/__init__.py`** and most package `__init__.py` files are empty — fine,
   but nothing re-exports a public API, so callers reach deep into module paths.
 - **`transformers>=5.21.0`** is a dependency but only `AutoConfig` is used. The tokenizer
   and chat template are needed for section 8.

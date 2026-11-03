@@ -19,23 +19,4 @@ dependencies = [
 miniserve = "miniserve.cli:main"
 
 [dependency-groups]
-dev = [
-    "httpx>=0.27",
-    "pytest>=8.0",
-    "textual>=1.0",
-]
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/miniserve"]
-
-[tool.pytest.ini_options]
-pythonpath = ["src", "."]
-testpaths = ["tests"]
-
-[tool.ruff]
-line-length = 88
-target-version = "py313"
+dev = ["httpx>=0.27", "pytest>=8.0", "textual>=1.0"]
