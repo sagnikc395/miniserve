@@ -1,8 +1,9 @@
 # TODO
 
 Open work across the repo. Background on the macOS constraints is in [MPS.md](MPS.md),
-the design walkthrough is in [FLOW.md](FLOW.md), and the target architecture is the
-mermaid diagrams in [README.md](../README.md); this file is the actionable list.
+the design walkthrough is in [FLOW.md](FLOW.md), the full project reference is
+[MINISERVE.md](../MINISERVE.md), and the architecture diagrams are in
+[README.md](../README.md); this file is the actionable list.
 
 Measurements below were taken on: M4, 24 GB, macOS 26.5, torch 2.14.1, Python 3.13.
 
@@ -12,56 +13,47 @@ Measurements below were taken on: M4, 24 GB, macOS 26.5, torch 2.14.1, Python 3.
 |---|---|
 | `uv run main.py attn-demo` | works, matches naive attention to ~2e-7 |
 | `uv run main.py kv-demo` | works |
-| `pytest tests` | 10 passed (all `KVCacheManager`) |
-| `uv run main.py serve` / `generate` / `bench` | `ClickException("not implemented yet")` |
-| anything that loads a real checkpoint | blocked on section 5 |
+| `uv run pytest` | 10 passed (all `KVCacheManager`) |
+| `uv run main.py generate` | works, synchronous engine, streams to stdout |
+| `uv run main.py serve` | works, OpenAI-compatible, SSE streaming |
+| `uv run main.py bench` | works, both miniserve arms + optional HF baseline |
+| `uv run tui.py` | works, `--spawn` owns the server |
+| loading a real checkpoint | works (dense + MoE, fused qkv / gate_up) |
 
-`core/` (scheduler, KV cache manager, sequence) and `attention/` are the two layers that
-look finished. Everything from `DecoderLayer` upward is partial or empty.
+The end-to-end path is complete. What is left is **performance** (Part A),
+**test coverage** (Part B), and a short list of loose ends (Part C).
 
 ---
 
-# Part A — attention backends
+# Part A — attention performance
 
-## 1. The `sdpa` backend is an alias, and unreachable on Mac
+This is where the remaining wins are. The repo is correct and slow.
 
-`paged_sdpa_attention()` in `miniserve/attention/paged_sdpa.py` returns
-`torch_ref_attention` — the same object the `torch` backend returns. The registry holds
-two names for one implementation:
+## 1. ~~The `sdpa` backend is an alias, and unreachable on Mac~~ — done
 
-```
-torch -> <function torch_ref_attention at 0x10f32eca0>
-sdpa  -> <function torch_ref_attention at 0x10f32eca0>   # same address
-```
+`paged_sdpa_attention()` now returns a real closure that is distinct from
+`torch_ref_attention`, and `EngineConfig.__post_init__` selects `sdpa` on anything
+that is not CPU (CPU keeps `torch` because it is easier to debug). The split is the
+one the README flowchart calls for:
 
-It is also dead code on the only platform currently in use. `EngineConfig.__post_init__`
-forces `attention_backend = "torch"` on any non-CUDA device, so on MPS:
+- uniform query length (decode, or uniform speculative verification) ->
+  `_batched_attention`, one SDPA over the whole batch
+- mixed prefill/decode -> `torch_ref_attention`, per-sequence, bottom-right causal
 
-```
-device mps | backend torch | block_size 16 | dtype float16
-```
+`torch_ref_attention` stays as the correctness oracle. It matches the naive unpaged
+path to ~2e-7 across prefill, decode, chunked prefill, mixed and GQA steps. Keep
+diffing the fast path against it.
 
-The `block_size = 256` bump in the `else` branch — the one thing that suggests `sdpa`
-means something different from `torch` — only ever fires on CUDA.
+## 2. ~~Use `enable_gqa=True` instead of `repeat_interleave`~~ — done
 
-The README's engine flowchart already says what the split should be:
+Both paths now pass `enable_gqa=True` and no longer materialize `H/Hkv` physical
+copies of the KV heads. The mask is also skipped entirely when it would be all-True:
+`torch_ref` skips it for `q_len == 1` or `q_len == kv_len`, and `_batched_attention`
+skips it when `q_len == 1` and every context is the same length, which keeps SDPA on
+its fused vector kernel.
 
-- `all q_len == 1` (decode) -> **batched paged SDPA, single gather, padding mask**
-- prefill / mixed -> **per-sequence SDPA, bottom-right causal mask**
-
-So `paged_sdpa` should become the batched decode path and `torch_ref` stay the
-per-sequence reference, with `config.py` selecting `sdpa` on `mps` instead of forcing
-`torch`. Items 2-4 are that work.
-
-`torch_ref_attention` itself is fine as a correctness oracle — it matches the naive
-unpaged path to ~2e-7 across prefill, decode, chunked prefill, mixed and GQA steps. Keep
-it as the thing the fast path is diffed against.
-
-## 2. Use `enable_gqa=True` instead of `repeat_interleave`
-
-`paged_sdpa.py:54-55` materializes `H/Hkv` physical copies of every KV head before
-calling SDPA. Torch 2.14 accepts `enable_gqa=True`, which does the broadcast inside the
-kernel. Decode step, fp16, `H=16, Hkv=2, D=128, kv_len=2048`:
+The measurement that motivated this, decode step, fp16, `H=16, Hkv=2, D=128,
+kv_len=2048`:
 
 | path | per call |
 |---|---|
@@ -70,155 +62,216 @@ kernel. Decode step, fp16, `H=16, Hkv=2, D=128, kv_len=2048`:
 
 `max abs diff: 0.0` — identical numerics, ~9x cheaper.
 
-Part of that gap is the mask. When `q_len == 1` every key is visible, so the mask is
-all-True and only forces SDPA off its fast path. Skip `attn_mask` entirely in the decode
-case.
+## 3. The page gather is the real ceiling — **still open, largest win**
 
-Low effort, no architectural change. Do this first.
+`_gather_prefix` in `paged_sdpa.py` does
 
-## 3. The page gather is the real ceiling
+```python
+k_cache[blocks].flatten(0, 1)[:kv_len]
+```
 
-`k_cache[blocks].flatten(0, 1)[:kv_len]` copies a request's whole context out of the pool,
-every layer, every step. Same shape as above, `block_size=16`:
+which copies a request's whole context out of the pool, every layer, every step.
+`block_size=16`, same shape as above:
 
 ```
 page gather (K only): 366.2 us/call, copies 1.05 MB
 => per decode step, 28 layers x K and V: 20.5 ms, 59 MB copied
 ```
 
-That is ~20 ms per decode step for a *single* sequence before any attention math — a
-ceiling of roughly 50 tok/s on the gather alone, and it grows linearly with context.
+~20 ms per decode step for a *single* sequence before any attention math — a ceiling
+of roughly 50 tok/s on the gather alone, growing linearly with context. Items 1 and 2
+removed overheads *around* this; they did not touch it.
 
-This is what a real paged kernel exists to avoid: attend page-by-page and combine the
-partials with log-sum-exp, so the KV never leaves the pool. MPS.md section 3 lists the
-options; the `kv_layout: "dense_slots"` config field is the cheaper escape hatch (reserve
-capacity per slot, slice instead of gather) if the full kernel is too much for now.
+Two ways out:
+
+- **The real fix:** attend page-by-page and combine the partials with log-sum-exp, so
+  K/V never leaves the pool. That is what a paged kernel is for. [MPS.md](MPS.md)
+  section 3 lists the options for writing one on Metal.
+- **The cheap escape hatch:** the `kv_layout: "dense_slots"` config field (declared,
+  never read — see Part C). Reserve capacity per sequence slot and *slice* instead of
+  gathering. Costs memory, keeps the paged bookkeeping, removes the copy.
 
 Largest win available, largest effort.
 
-## 4. Collapse the per-request Python loop
+## 4. Collapse the per-request Python loop — **partially done**
 
-One SDPA dispatch per request per layer: 16 seqs x 28 layers = 448 dispatches per step,
-and MPSGraph launch overhead is heavier than CUDA's. A decode-only step has `q_len == 1`
-everywhere, so it can collapse into a single batched `[B, H, 1, kv_max]` SDPA with a
-padding mask. The loop comment ("ideally vectorized the whole thing, by creating a block
-mask") already anticipates this.
+Done: a step where every request has the same query length now goes through
+`_batched_attention`, which issues **one** SDPA dispatch for the whole batch instead
+of one per request. For pure decode that is 28 dispatches per step instead of
+16 x 28 = 448.
+
+Still open, two pieces:
+
+- `_batched_attention` still loops in Python to gather and `F.pad` each request's
+  prefix before `torch.stack`. The dispatch loop is gone; the gather loop is not. This
+  is the same problem as item 3 and goes away with it.
+- **Mixed prefill/decode steps still fall back to `torch_ref_attention`**, one
+  dispatch per request per layer. With chunked prefill a mixed step is the common
+  case under load, not the exception. A block mask over the packed stream would let
+  one dispatch cover prefill chunks and decode tokens together; that is the thing the
+  original "ideally vectorized the whole thing" comment was pointing at.
+
+## 5. CUDA graphs are captured but never exercised here
+
+`capture_cuda_graphs` / `graph_sizes` / the `self.graphs` lookup in `run()` are
+written and look correct, but MPS exposes no capture/replay API and
+`EngineConfig.__post_init__` forces `use_cuda_graphs = False` off CUDA
+([MPS.md](MPS.md) section 1). So the code is untested in practice. Either verify it on
+a CUDA box or treat it as aspirational — just don't expect a decode fast path from it
+on a Mac.
 
 ---
 
-# Part B — the rest of the repo
+# Part B — tests
 
-## 5. `model/` — the model is not assembled (blocks everything)
+The thinnest part of the repo, and the reason Part A is risky to attempt.
 
-This is the critical path. Nothing that touches a real checkpoint can work until it is
-done.
+## 6. Only `KVCacheManager` is covered
 
-- **`layers.py:36` — `DecoderLayer` is `pass`.** `Model.__init__` builds
-  `ModuleList(DecoderLayer(cfg, i) ...)` and `Model.forward` calls
-  `layer(x, residual, cos, sin)` expecting `(x, residual)` back. Nothing implements that.
-  It also needs to expose its attention module as `self_attn` or `attn`, because
-  `ModelRunner.allocate_kv_cache` reaches in via
-  `getattr(layer, "self_attn", None) or getattr(layer, "attn", None)` to hang the KV
-  tensor on it.
-- **No MLP at all.** No `MLP`, `MoE` or `gate_up_proj` class exists anywhere in the package.
-- **The loader and the model disagree about weight layout.** `loader.py` resolves
-  checkpoint keys against a *fused* model — it looks up `module.qkv_sizes`,
-  `module.qkv_proj`, `module.gate_up_sizes`, `module.gate_up_proj`, and
-  `layer.mlp.load_expert` / `w13` / `w2` for MoE. Confirmed count of non-loader references
-  to each of those: **zero**. Meanwhile `model/attention.py` defines separate `q_proj` /
-  `k_proj` / `v_proj`. The README says "fused qkv", so `attention.py` is the side that
-  should change — fuse the three projections and publish `qkv_sizes`. Until then
-  `load_model` raises on the first checkpoint tensor it tries to place, and the
-  `assert not missing` at the end would fire anyway.
-- **Tensor parallelism is deliberately unimplemented** — `shard_config` and `load_shard`
-  raise `NotImplementedError` for `tp_size > 1`. Fine to leave; just don't pass `tp_size`.
+`tests/test_kv_cache.py` is 10 tests, all passing, all on the cache manager.
+`tests/fakes.py` now has real doubles — `FakeTokenizer`, `FakeEngine`,
+`FakeAsyncEngine` (yields a canned token stream), `FakeRequest` — but **nothing uses
+them yet**.
 
-## 6. `runner/model_runner.py` — one real bug, one unwired TODO
+In rough order of value:
 
-- **`model_runner.py:180` is a bug.** `blocks = np.asarray(s.req_block_ids)` — `s` is a
-  `ScheduledRequest`, whose fields are `req`, `num_computed`, `num_new`. There is no
-  `req_block_ids` attribute anywhere in the repo. This should be `s.req.block_ids`. It is
-  an `AttributeError` on the first real `_prepare` call; it has not surfaced yet only
-  because nothing can get that far (section 5).
-- **`model_runner.py:34` — `# TODO: set attention backends`.** The runner never calls
-  `get_attention_fn(cfg.attention_backend)`, and never passes an `attn_fn` down. But
-  `Attention.__init__` *requires* one, and `Model` / `DecoderLayer` have no parameter to
-  thread it through. Resolve together with section 5: decide whether the fn is passed
-  down the constructor chain or read from a context var the way `AttnMetadata` is.
-- **`prev_tokens` / `tokens_host` are allocated and never used.** The comment says
-  `Engine.step` picks them up — that consumer does not exist yet (section 7).
-- **`capture_cuda_graphs` is CUDA-only and unreachable on Mac** (`use_cuda_graphs` is
-  forced `False` on non-CUDA, and MPS exposes no capture/replay API — MPS.md section 1).
-  Leave it; just don't expect a decode fast path from it here. `graph_sizes` and the
-  `self.graphs` lookup in `run()` are correct for CUDA.
-- **`run()` drops two `SamplingParams` fields.** It calls
-  `sample(logits, [s.req.params for s in batch])` with no `token_ids`, so
-  `forced_token_ids` (teacher forcing) and `return_logprobs` are silently ignored, and
-  `Request.logprobs` / `Output.logprobs` are never populated. `sample()` itself accepts a
-  `token_ids` argument it never reads.
+- **`Scheduler`** — the subtlest code in the repo and completely untested. Worth
+  covering: the chunked-prefill budget (a prompt longer than
+  `max_num_batched_tokens` is split across steps and nothing else starves);
+  preemption (newest victim first, budget returned to the pool, victim requeued at the
+  front, `num_computed_tokens` reset); the `victim is req` degenerate case where a
+  single request outgrows the whole cache; and that admission is skipped in any step
+  that preempted. All of it runs on CPU with no model loaded.
+- **The attention backends.** `attn-demo`'s naive-path comparison is already an
+  integration test; promote it to a real pytest case so a backend change cannot
+  regress silently. Do this **before** attempting Part A items 3 and 4.
+- **`sample()`** — top-k and top-p boundaries (the exclusive cumsum means the token
+  that crosses the threshold is kept), mixed per-row temperatures in one batch,
+  `temperature == 0` rows taking the argmax path, and teacher forcing via `token_ids`.
+- **`ModelRunner._prepare`** — slot mapping arithmetic (`blocks[p // bs] * bs + p % bs`)
+  against a hand-built block table, `query_start_loc` prefix sums, `logit_rows`
+  pointing at the last row of each request, and the `pad_to` dummy rows.
+- **The API layer** — `FakeAsyncEngine` exists precisely for this. Worth covering:
+  the prompt-too-long 400 with `code="context_length_exceeded"`, `n != 1` -> 400, the
+  SSE chunk shape (role on the first delta only, empty deltas skipped, the
+  `finish_reason` chunk, the usage chunk under `stream_options.include_usage`, then
+  `[DONE]`), and abort-on-disconnect.
+- **`Detokenizer`** — the multi-byte UTF-8 hold-back. Feed it ids that split a
+  character and assert nothing is emitted until `final=True`.
+- **`runner/memory.py`** — pure arithmetic, trivial to test, and the docstring already
+  claims testability as its reason for existing.
 
-## 7. `engine/` — the engine loop is missing
+## 7. No end-to-end golden test
 
-`engine/engine.py` has `Output` and a finished `Detokenizer`, and nothing else. Per the
-README both of these are still to be written:
+Nothing asserts that greedy generation from a fixed prompt produces a fixed token
+sequence. That is the test that makes every Part A change safe, and the test
+[SPECULATIVE_DECODING.md](SPECULATIVE_DECODING.md) assumes exists ("greedy output with
+speculation enabled is token-for-token identical to greedy output without it").
 
-- **`Engine.step()`** — the synchronous loop: `scheduler.schedule()` ->
-  `runner.run(batch)` -> discard samples for mid-prompt chunks
-  (`ScheduledRequest.completes_prompt` is already there for this) -> append committed
-  tokens -> detokenize -> build `Output`. Note that **stop conditions live here, not in
-  the scheduler**: nothing currently checks `params.max_tokens`, EOS, or `ignore_eos`, and
-  `Scheduler.finish(req, reason)` has no caller.
-- **`AsyncEngine`** — inbox queue, dedicated engine thread, `call_soon_threadsafe`
-  hand-off back to the event loop for SSE streaming.
+Use the smallest real checkpoint that works (`HuggingFaceTB/SmolLM2-135M-Instruct`),
+`--device cpu --attention-backend torch`, temperature 0. Mark it slow so the default
+run stays fast.
 
-## 8. `api/` — entirely empty (13 files, 0 bytes)
+---
 
-`app.py`, `deps.py`, `errors.py`, `schemas.py`, `settings.py` and every router
-(`chat.py`, `completions.py`, `health.py`, `metrics.py`, `models.py`) are zero-length,
-as are the two `__init__.py`. `fastapi` is already a declared dependency. Needs:
-`create_app()` + lifespan holding the engine on `app.state`, a `get_engine` dependency,
-pydantic request/response schemas, chat-template application and tokenization, the
-prompt-too-long 400, and SSE streaming with a final usage chunk. Depends on section 7.
+# Part C — loose ends
 
-## 9. `benchmarks/` — entirely empty
+## 8. Declared-but-unused config fields
 
-`run.py`, `prompts.py`, `hf_baseline.py` and `__init__.py` are all zero-length.
-`main.py bench` is the entry point waiting on them. The HF baseline is what makes the
-Part A numbers meaningful end to end.
+`kv_layout` and `decode_backend` in `config.py` are read by nothing.
+`kv_layout` is the escape hatch for Part A item 3, so it is worth keeping as a
+placeholder; `decode_backend` (`eager` / `compiled` / `metal`) has no consumer and no
+concrete plan — either wire it to `torch.compile` or drop it from the dataclass.
 
-## 10. `runner/memory.py` — a two-line comment
+## 9. Accepted-but-ignored API fields
 
-```
-# TODO:
-# add support for memory and recently used context windows
-```
+`api/schemas.py` declares `stop` and `seed` on both request models, and neither is
+honoured anywhere:
 
-Decide whether this is real scope or should be deleted. Note `allocate_kv_cache` already
-handles device memory budgeting, so the filename is misleading.
+- **`stop`** needs string-level stop sequences in `Engine.step`, which means checking
+  the detokenized text, not just token ids — plus truncating the emitted delta at the
+  match. Non-trivial because a stop string can straddle a token boundary and a delta
+  may already have been streamed.
+- **`seed`** is per-request; `EngineConfig.seed` is global and applied once in
+  `ModelRunner.__init__`. Honouring it per request means a generator per request in
+  `sample()`.
 
-## 11. Tests — one module covered out of the whole repo
+Either implement them or reject them with a 400 rather than silently ignoring them —
+silently ignoring `stop` is the one most likely to surprise a client.
 
-`tests/unit/test_kv_cache.py` (10 tests, all passing) is the only test file.
-`tests/fakes.py` is a two-line comment promising `FakeAsyncEngine` and random paged-cache
-builders. Nothing covers the scheduler (preemption and the chunked-prefill budget are the
-subtlest code in the repo), `sample()`, the attention backends, `_prepare`, or the API.
+`SamplingParams.return_logprobs` and `Request.logprobs` are plumbed all the way
+through `Engine.step` and `Output`, but no route exposes them: `/v1/completions`
+returns a hardcoded `"logprobs": None`. The engine-side work is done; only the
+serialisation is missing.
 
-The attention demo is effectively an integration test already — worth turning
-`attn-demo`'s naive-path comparison into a real pytest case so a backend change cannot
-regress silently, especially before touching Part A items 2-4.
+## 10. `pyproject.toml` has no `[build-system]`
 
-## 12. Smaller loose ends
+`[project.scripts]` declares a `miniserve` console script, but without a build backend
+the package is never installed, so the entry point is inert and everything runs as
+`uv run main.py`. `cli.py` already has fallbacks for this (`attn-demo` / `kv-demo`
+re-derive the repo root to import `demos/`). Either add a build backend and make the
+console script real, or drop `[project.scripts]` so it stops implying something that
+does not work.
 
-- **`config.py:46`** — with the flash-attn resolution commented out, a CUDA device with
-  `attention_backend="auto"` is never rewritten to a real backend name, so
-  `get_attention_fn("auto")` raises `KeyError`. Non-CUDA is unaffected (forced to
-  `"torch"`). Either restore the auto-resolution or drop `"auto"` from the `Literal`.
-- **`config.py`** — `kv_layout` and `decode_backend` are declared and never read by
-  anything. `kv_layout` ties into Part A item 3.
-- **`pyproject.toml`** — `[project.scripts]` declares a `miniserve` console script,
-  but there is no `[build-system]`, so the package is never installed and the CLI
-  only runs as `python main.py`.
-- **`miniserve/__init__.py`** and most package `__init__.py` files are empty — fine,
-  but nothing re-exports a public API, so callers reach deep into module paths.
-- **`transformers>=5.21.0`** is a dependency but only `AutoConfig` is used. The tokenizer
-  and chat template are needed for section 8.
+## 11. No public API surface
+
+`miniserve/__init__.py` and every package `__init__.py` are empty, so callers reach
+deep into module paths (`from miniserve.engine.engine import Engine`). Fine for a
+reading-oriented repo, but re-exporting `EngineConfig`, `Engine`, `AsyncEngine` and
+`SamplingParams` from `miniserve/__init__.py` would make the library usable without
+knowing the layout.
+
+## 12. Monitoring stack is documented but not committed
+
+[MONITORING.md](MONITORING.md) describes a `deploy/` tree (docker-compose,
+`prometheus.yml`, Grafana provisioning and dashboard JSON) that does not exist in the
+repo. The `/metrics` endpoint and all the counters and gauges it documents **are**
+implemented; only the deployment files are missing. Either commit `deploy/` or mark
+those sections as a recipe rather than a description.
+
+Also still open from that doc: **latency histograms**. The current `/metrics` has
+counters and gauges only, so there is no TTFT, no end-to-end latency and no per-step
+duration. Section 3 of that doc has the design — record arrival / first-token /
+finish timestamps on the `Request`, keep bounded histograms on the engine, export in
+Prometheus histogram format.
+
+## 13. Stray empty `metrics/` directory
+
+`metrics/` at the repo root is empty and nothing references it. Probably a leftover
+from the monitoring work; delete it or put the `deploy/` stack in it.
+
+## 14. Tensor parallelism stays unimplemented, on purpose
+
+`loader.shard_config` and `load_shard` raise `NotImplementedError` for `tp_size > 1`.
+Sharding needs per-key split dimensions that do not exist, and a silently wrong
+sharded model is far worse than a failed load. Leave it; just don't pass `tp_size`.
+
+---
+
+# Part D — the next feature
+
+[SPECULATIVE_DECODING.md](SPECULATIVE_DECODING.md) is the design note. The repo is
+structurally ready for it — verification is a chunked prefill, which `slot_mapping`,
+block tables and the token budget already handle — but five places assume exactly one
+new token per sequence per step:
+
+1. `_prepare` returns one `logit_row` per sequence; needs a list per sequence so the
+   runner can hand back `[B, k+1, V]`.
+2. `Engine.step` appends one token and checks stop conditions once; needs a list per
+   sequence, truncated at the first stop.
+3. **KV rollback vs prefix caching — the one real correctness hazard.**
+   `KVCacheManager.allocate` calls `register_full_blocks` with a total that would
+   include draft tokens, so a block filled by tokens that are later rejected would be
+   hashed and published as a reusable prefix. Split `allocate()` (reserve pages) from
+   `commit(req, n)` (hash and register only accepted tokens) and add `rollback(req, n)`.
+   Worth doing **now**, before speculation exists, because it is a quiet bug and the
+   split is harmless on its own.
+4. `_batched_attention` already takes a uniform `q_len`, so verification at `q = k+1`
+   reuses that path — but the bottom-right causal mask branch needs checking for
+   `q_len > 1` with unequal context lengths.
+5. `sample()` needs to accept `[B, k+1, V]` plus optional draft probabilities and
+   implement the acceptance rule (greedy: accept while argmax matches; sampling: accept
+   with probability `min(1, p(x)/q(x))`, else resample from normalised `max(0, p - q)`).
+
+Build the n-gram / prompt-lookup proposer first: no model, no extra KV budget, works
+with greedy and with sampling.
