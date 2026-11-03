@@ -1,151 +1,180 @@
-Yes. The standard way is the same one vLLM uses: the engine records per-request timestamps, exposes them as **Prometheus** metrics on `/metrics`, Prometheus scrapes that endpoint every few seconds, and **Grafana** reads from Prometheus. Nothing in the engine talks to Grafana directly, so the dashboard stack stays outside your package.
+# Monitoring with Prometheus and Grafana
 
-## 1. Where it lives in the layout
+Three boxes, one direction of data flow:
 
 ```
-miniserve/
-  metrics/
-    __init__.py
-    timing.py          # RequestTimes dataclass + derived metrics (pure Python)
-    prometheus.py      # metric definitions and a Recorder that updates them
-  api/routers/metrics.py   # GET /metrics in Prometheus text format
+miniserve (native, needs MPS)          Docker
+┌──────────────────────────┐    ┌────────────┐    ┌─────────┐
+│ Engine ── counters,      │    │ Prometheus │    │ Grafana │
+│          gauges,         │◄───┤  scrapes   │◄───┤ queries │
+│          histograms      │ 5s │  /metrics  │    │ PromQL  │
+│ GET /metrics (text)      │    │  stores    │    │  draws  │
+│ GET /stats   (JSON)      │    └────────────┘    └─────────┘
+└──────────────────────────┘
+```
+
+Prometheus pulls; the engine never pushes and never talks to Grafana. So the
+whole dashboard stack lives in `deploy/` and nothing in `miniserve/` imports it.
+If Prometheus is down, serving is unaffected.
+
+## 1. What already works
+
+`miniserve/api/routers/metrics.py` serves both endpoints today:
+
+- `GET /stats` — `Engine.stats()` as JSON, which the TUI reads.
+- `GET /metrics` — the same numbers rendered as Prometheus text, by hand. There is no `prometheus_client` dependency, and there doesn't need to be: the engine already keeps running totals in `Engine.stats()`, so the exporter is a loop over two dicts.
+
+Exported now:
+
+| Counters | Gauges |
+|---|---|
+| `miniserve_requests_total` | `miniserve_num_requests_running` |
+| `miniserve_requests_finished_total` | `miniserve_num_requests_waiting` |
+| `miniserve_prompt_tokens_total` | `miniserve_kv_cache_usage_ratio` |
+| `miniserve_generation_tokens_total` | `miniserve_kv_cache_used_blocks` |
+| `miniserve_prefix_cache_hit_tokens_total` | `miniserve_kv_cache_total_blocks` |
+| `miniserve_preemptions_total` | `miniserve_step_batched_tokens` |
+| | `miniserve_uptime_seconds` |
+
+All carry one label, `model_name`.
+
+That is enough for throughput, saturation and cache panels. What's missing is
+latency: nothing in `Request` records a timestamp, so there is no TTFT, no
+TPOT, no end-to-end. Two things to add, in this order:
+
+1. timestamps on `Request` plus six histograms in the exporter (§3, §4);
+2. the `deploy/` stack that scrapes and draws it (§5).
+
+## 2. Metric definitions
+
+Pin these down before touching code, because they decide where the timestamps go.
+
+| Metric | Definition | Recorded |
+|---|---|---|
+| Queue time | first scheduled − arrival | Scheduler admits the request |
+| TTFT | first output token − arrival | First committed token |
+| ITL | gap between consecutive output tokens | Every committed token after the first |
+| TPOT | (finish − first token) / (n_output − 1) | On finish, needs ≥ 2 output tokens |
+| E2E latency | finish − arrival | On finish |
+| Step time | duration of one `Engine.step` | Every step |
+
+Timing accuracy on MPS: GPU work is asynchronous, so a `perf_counter()` taken
+right after the forward call measures enqueue, not execution. The sampler ends
+in `.tolist()`, which forces a sync, so a timestamp taken in `Engine.step`
+*after* sampling reflects real completion. Take them there and nowhere else.
+
+## 3. Recording the timestamps
+
+Four fields on `Request` (`miniserve/core/sequence.py`), all `perf_counter`
+values, so only differences between them mean anything:
+
+```
+arrival          set in __init__
+first_scheduled  set once, on first admission
+first_token      set on the first committed token
+last_token       moved forward on every committed token
+```
+
+Where each one gets written:
+
+- **arrival** — `Request.__init__`, so it covers the scheduler queue even if
+  `add_request` is slow. Tokenization in the HTTP handler happens before this,
+  which is one reason to also measure client-side (§7).
+- **first_scheduled** — `Scheduler.schedule`, in the waiting-admission branch
+  right after `self.waiting.popleft()`. Guard it with `if ... is None`. A
+  preempted request goes back onto `waiting` and is admitted again; overwriting
+  the field would hide the original queueing delay and report near-zero queue
+  times under load, which is exactly when you need the number.
+- **first_token / last_token** — `Engine.step`, inside the per-request loop,
+  after the `if not s.completes_prompt: continue` guard. Tokens sampled from a
+  chunked prefill that stops mid-prompt are discarded, so counting them would
+  report a TTFT that never happened. First token sets `first_token` and observes
+  TTFT and queue time; later tokens observe ITL as `now - last_token`.
+- **on finish** — where `req.finished` is already checked, observe E2E, and TPOT
+  when `len(req.output_ids) >= 2`. Skip single-token outputs instead of
+  recording a zero; a zero drags the low bucket down and the division is
+  undefined anyway.
+
+Take `now = time.perf_counter()` once per step and reuse it for every request in
+the batch. They did all finish in the same forward pass, so per-request clock
+reads only add noise.
+
+If speculative decoding lands later (see `docs/SPECULATIVE_DECODING.md`),
+several tokens commit in one step sharing a timestamp, so ITL shows a mix of
+zeros and larger gaps. That's correct, not a bug — TPOT stays the comparable
+metric.
+
+## 4. Exporting histograms
+
+Keep the hand-rolled exporter. A Prometheus histogram is three series per
+metric, and nothing more:
+
+```
+<name>_bucket{le="0.025"}   cumulative count of observations <= 0.025
+<name>_bucket{le="+Inf"}    total count, must equal _count
+<name>_sum                  sum of observed values
+<name>_count                number of observations
+```
+
+Cumulative is the part people get wrong: an observation increments *every*
+bucket whose edge it is at or below, not just the first matching one. Get that
+backwards and `histogram_quantile` returns nonsense rather than an error.
+
+A small `miniserve/metrics.py` carries its weight here: a `Histogram` class with
+`observe()`, two bucket tuples, and the render helpers. Suggested shape:
+
+```
+LATENCY_BUCKETS = (0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60)
+TOKEN_BUCKETS   = (0.005, 0.01, 0.02, 0.03, 0.05, 0.075, 0.1, 0.15, 0.25, 0.5, 1)
+```
+
+| Series | Buckets |
+|---|---|
+| `miniserve_request_queue_time_seconds` | latency |
+| `miniserve_time_to_first_token_seconds` | latency |
+| `miniserve_e2e_request_latency_seconds` | latency |
+| `miniserve_time_per_output_token_seconds` | token |
+| `miniserve_inter_token_latency_seconds` | token |
+| `miniserve_step_duration_seconds` | token |
+
+Hold them on the engine (`self.metrics = EngineMetrics()`) so the exporter can
+reach them through `aeng.engine`, the way it already reaches `stats()`. Bucket
+edges are fixed at import and cannot be changed retroactively, so err wide:
+a value past the last finite edge still lands in `+Inf` and in `_sum`, and the
+mean stays right even when the p99 reads as "off the top".
+
+The engine thread updates these while FastAPI renders them from the event loop.
+No lock needed — a scrape landing mid-update reports one bucket count behind,
+which a `rate()` over a 1m window cannot even see.
+
+Two schema notes while you are in there:
+
+- Add a `reason` label to `miniserve_requests_finished_total` (`stop`, `length`,
+  `abort`, `error`). Distinguishing a healthy finish from a truncation is worth
+  one extra label, and it needs a per-reason counter in `Engine.stats()`.
+- `miniserve_step_batched_tokens` is a gauge of the *last* step. Fine for a live
+  "is the batch full" readout, useless for a distribution, since a scrape every
+  5s sees one step in several hundred. Make it a histogram too if batch fill
+  matters; that is the one metric where the gauge actively misleads.
+
+Resist adding labels beyond `model_name` and `reason`. Every combination is a
+separate time series, and a per-request-id label would turn this into a
+cardinality bomb within one benchmark run.
+
+## 5. The deploy stack
+
+The server runs natively because it needs MPS; only Prometheus and Grafana go in
+Docker. They reach the host through `host.docker.internal`.
+
+```
 deploy/
-  docker-compose.yml       # Prometheus + Grafana
+  docker-compose.yml
   prometheus.yml
   grafana/
     provisioning/datasources/prometheus.yml
     provisioning/dashboards/miniserve.yml
     dashboards/miniserve.json
-benchmarks/
-  load.py                  # async OpenAI-API load generator, client-side timings
-tests/unit/test_timing.py
 ```
-
-Keep `metrics/timing.py` free of `prometheus_client` so it is unit-testable with a fake clock, and keep `prometheus.py` as the only module that imports the client library.
-
-## 2. Definitions
-
-Get these precise first, since they decide where the timestamps go:
-
-| Metric | Definition | Recorded |
-|---|---|---|
-| Queue time | first scheduled − arrival | Scheduler admits the sequence |
-| TTFT | first output token − arrival | First committed token |
-| ITL (inter-token latency) | gap between consecutive output tokens | Every committed token |
-| TPOT | (e2e − TTFT) / (n_output − 1) | On finish |
-| E2E latency | finish − arrival | On finish |
-| Prefill time | first token − first scheduled | On first token |
-| Throughput (TPS) | output tokens per second, across all requests | Counter, rate computed in Prometheus |
-| Context length | prompt tokens, and total tokens at finish | On admit and on finish |
-
-Two engine-level metrics are just as useful for a tinyserve-style engine: **step time** and **tokens per step** (how full each forward pass is), plus gauges for running/waiting sequences, KV cache usage, and prefix cache hit rate.
-
-A note on timing accuracy on MPS: GPU work is asynchronous, so a `time.perf_counter()` right after the forward call measures enqueue time, not execution time. In your engine the sampler ends with `.tolist()`, which forces a sync, so timestamps taken in `Engine.step` after sampling reflect real completion. Keep them there.
-
-## 3. Recording timings
-
-```python
-# metrics/timing.py
-from dataclasses import dataclass, field
-import time
-
-Clock = time.perf_counter
-
-@dataclass
-class RequestTimes:
-    arrival: float
-    first_scheduled: float | None = None
-    first_token: float | None = None
-    last_token: float | None = None
-    finished: float | None = None
-    itl: list[float] = field(default_factory=list)
-
-    def on_token(self, now: float) -> None:
-        if self.first_token is None:
-            self.first_token = now
-        else:
-            self.itl.append(now - self.last_token)
-        self.last_token = now
-
-    @property
-    def ttft(self) -> float:  return self.first_token - self.arrival
-    @property
-    def queue(self) -> float: return self.first_scheduled - self.arrival
-    @property
-    def e2e(self) -> float:   return self.finished - self.arrival
-
-    def tpot(self, n_out: int) -> float | None:
-        return None if n_out < 2 else (self.finished - self.first_token) / (n_out - 1)
-```
-
-Add `times: RequestTimes` to `Sequence`. Set `first_scheduled` in the scheduler's admission phase only the first time (a preempted sequence that is readmitted keeps its original value, otherwise preemption hides queueing delay). Call `on_token` in `Engine.step` where tokens are committed. If you add speculative decoding later, several tokens commit in one step with the same timestamp, so ITL naturally shows a mix of zeros and larger gaps; that is correct behaviour, and TPOT is the cleaner metric to compare.
-
-## 4. Prometheus metrics
-
-```python
-# metrics/prometheus.py
-from prometheus_client import Counter, Gauge, Histogram, Info
-
-LAT = (0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60)
-TOK_LAT = (0.005, 0.01, 0.02, 0.03, 0.05, 0.075, 0.1, 0.15, 0.25, 0.5, 1)
-LEN = (16, 64, 128, 256, 512, 1024, 2048, 4096, 8192)
-L = ["model_name"]
-
-TTFT  = Histogram("miniserve_time_to_first_token_seconds", "TTFT", L, buckets=LAT)
-TPOT  = Histogram("miniserve_time_per_output_token_seconds", "TPOT", L, buckets=TOK_LAT)
-ITL   = Histogram("miniserve_inter_token_latency_seconds", "ITL", L, buckets=TOK_LAT)
-E2E   = Histogram("miniserve_e2e_request_latency_seconds", "E2E", L, buckets=LAT)
-QUEUE = Histogram("miniserve_request_queue_time_seconds", "Queue", L, buckets=LAT)
-STEP  = Histogram("miniserve_step_duration_seconds", "Engine step", L, buckets=TOK_LAT)
-
-PROMPT_LEN = Histogram("miniserve_request_prompt_tokens", "Prompt length", L, buckets=LEN)
-GEN_LEN    = Histogram("miniserve_request_generation_tokens", "Output length", L, buckets=LEN)
-STEP_TOK   = Histogram("miniserve_step_batched_tokens", "Tokens per step", L,
-                       buckets=(1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048))
-
-PROMPT_TOK = Counter("miniserve_prompt_tokens", "Prompt tokens", L)
-GEN_TOK    = Counter("miniserve_generation_tokens", "Generated tokens", L)
-CACHED_TOK = Counter("miniserve_prefix_cache_hit_tokens", "Prompt tokens from cache", L)
-FINISHED   = Counter("miniserve_requests_finished", "Finished", L + ["reason"])
-PREEMPT    = Counter("miniserve_preemptions", "Preemptions", L)
-
-RUNNING  = Gauge("miniserve_num_requests_running", "Running", L)
-WAITING  = Gauge("miniserve_num_requests_waiting", "Waiting", L)
-KV_USAGE = Gauge("miniserve_kv_cache_usage_ratio", "Used KV blocks / total", L)
-MPS_MEM  = Gauge("miniserve_mps_driver_allocated_bytes", "Metal driver memory", L)
-
-CONFIG = Info("miniserve_engine", "Engine configuration")
-```
-
-Counters get a `_total` suffix automatically when exported. A `Recorder` class wraps these, binds `model_name` once with `.labels(...)`, and exposes `on_step(batch, duration, scheduler, kv)` and `on_finish(seq)`. Call it from `Engine.step`; `prometheus_client` is thread-safe, so updating from the engine thread while FastAPI serves `/metrics` from the event loop is fine.
-
-At startup, publish the config so dashboards can compare runs:
-
-```python
-CONFIG.info({"model": cfg.model, "dtype": str(cfg.dtype), "backend": cfg.attention_backend,
-             "block_size": str(cfg.block_size), "max_num_seqs": str(cfg.max_num_seqs),
-             "prefix_caching": str(cfg.enable_prefix_caching)})
-```
-
-Expose them with a plain route (mounting `make_asgi_app()` at `/metrics` works too, but redirects to `/metrics/`):
-
-```python
-# api/routers/metrics.py
-from fastapi import APIRouter, Response
-from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-
-router = APIRouter()
-
-@router.get("/metrics", include_in_schema=False)
-def metrics() -> Response:
-    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
-```
-
-Your current JSON `/metrics` endpoint moves to `/stats` so the two don't collide.
-
-## 5. Prometheus and Grafana on the Mac
-
-Run the server natively (it needs MPS) and only the monitoring stack in Docker. Containers reach the host via `host.docker.internal`.
 
 ```yaml
 # deploy/docker-compose.yml
@@ -198,93 +227,103 @@ providers:
       path: /var/lib/grafana/dashboards
 ```
 
-Then `docker compose -f deploy/docker-compose.yml up -d`, start the server, and open `localhost:3000`. The easiest way to produce `miniserve.json` is to build the panels in the Grafana UI once, export the dashboard as JSON, and commit it; provisioning reloads it on every start.
+Anonymous admin is deliberate: this is a laptop dev stack, so skipping the login
+screen is worth more than the access control. Don't copy that compose file
+anywhere a network can reach it.
 
-## 6. Panels and queries
+`miniserve.json` is painful to hand-write and the schema is effectively
+undocumented. Build the panels once in the Grafana UI, export from
+**Dashboard settings → JSON Model**, and commit the result; provisioning
+reloads it on every start. vLLM's dashboard JSON is a faster starting point than
+an empty canvas — clone it and rewrite the `vllm:` prefixes to `miniserve_`.
+
+## 6. Panels
+
+With no label filter yet, add a Grafana variable `model_name` from
+`label_values(miniserve_num_requests_running, model_name)` and filter every
+query on it.
 
 | Panel | Type | PromQL |
 |---|---|---|
-| TTFT p50 / p95 / p99 | Time series | `histogram_quantile(0.95, sum by (le) (rate(miniserve_time_to_first_token_seconds_bucket[1m])))` |
-| TPOT p50 / p95 | Time series | same pattern on `miniserve_time_per_output_token_seconds_bucket` |
-| E2E latency p95 | Time series | same pattern on `miniserve_e2e_request_latency_seconds_bucket` |
+| TTFT p50/p95/p99 | Time series | `histogram_quantile(0.95, sum by (le) (rate(miniserve_time_to_first_token_seconds_bucket[1m])))` |
+| TPOT p50/p95 | Time series | same pattern on `miniserve_time_per_output_token_seconds_bucket` |
+| E2E p95 | Time series | same pattern on `miniserve_e2e_request_latency_seconds_bucket` |
+| Queue time p95 | Time series | same pattern on `miniserve_request_queue_time_seconds_bucket` |
 | Mean TTFT | Stat | `rate(miniserve_time_to_first_token_seconds_sum[1m]) / rate(miniserve_time_to_first_token_seconds_count[1m])` |
 | Output TPS | Time series | `rate(miniserve_generation_tokens_total[1m])` |
 | Prompt TPS | Time series | `rate(miniserve_prompt_tokens_total[1m])` |
-| Request rate | Time series | `sum(rate(miniserve_requests_finished_total[1m]))` |
+| Request rate | Time series | `rate(miniserve_requests_finished_total[1m])` |
+| Finish reasons | Time series | `sum by (reason) (rate(miniserve_requests_finished_total[1m]))` |
 | Running / waiting | Time series | `miniserve_num_requests_running`, `miniserve_num_requests_waiting` |
 | KV cache usage | Gauge | `miniserve_kv_cache_usage_ratio` |
 | Prefix cache hit rate | Stat | `rate(miniserve_prefix_cache_hit_tokens_total[5m]) / rate(miniserve_prompt_tokens_total[5m])` |
-| Prompt length distribution | Heatmap | `sum by (le) (rate(miniserve_request_prompt_tokens_bucket[1m]))` |
-| TTFT vs context length | Heatmap | the TTFT buckets, split by a prompt-length label (see below) |
-| Batch fill | Time series | p50 of `miniserve_step_batched_tokens_bucket` |
+| Step time p95 | Time series | same pattern on `miniserve_step_duration_seconds_bucket` |
+| Batch fill | Time series | `miniserve_step_batched_tokens` |
 | Preemptions | Time series | `rate(miniserve_preemptions_total[1m])` |
-| MPS memory | Time series | `miniserve_mps_driver_allocated_bytes` |
 
-Add a Grafana variable `model_name` from `label_values(miniserve_num_requests_running, model_name)` and filter every query on it.
+Two things worth remembering:
 
-For "latency vs context length", a histogram cannot be correlated with another histogram after the fact. If you want TTFT broken down by prompt size, add a coarse `prompt_bucket` label (`short`, `medium`, `long`, using the same edges as your benchmark bins) to the TTFT histogram only. Keep label sets small; every label combination is a separate time series.
+`sum by (le) (rate(..._bucket[1m]))` is the fixed incantation for a percentile.
+`rate` first, then `sum by (le)`, then `histogram_quantile`. Any other order is
+wrong, and the wrong order still returns numbers.
 
-Keep the `rate(...[1m])` window at least 4x the scrape interval, otherwise short benchmark runs show gaps.
+Keep the `rate()` window at 1m or more against a 5s scrape — a window under
+about 4× the interval leaves gaps in panels during short runs.
 
-## 7. Client-side measurement and run comparisons
+Histograms cannot be correlated after the fact, so "TTFT by prompt length" is
+not a query you can write over the metrics above. It needs a coarse
+`prompt_bucket` label (`short`/`medium`/`long`) added to the TTFT histogram at
+record time. Decide that early; migrating label sets later is the expensive kind
+of change.
 
-Server-side metrics exclude tokenization in the HTTP handler, network, and SSE framing, so also measure from the client. `benchmarks/load.py` should send streaming requests through the OpenAI API at a controlled rate (fixed QPS with Poisson arrivals, or a fixed concurrency), record TTFT and per-chunk arrival times for each request, and write one JSON line per request with the run's config.
+## 7. Checking it actually works
 
-Grafana is best for watching a live server. For comparing benchmark runs side by side (prefix cache on vs off, block size 16 vs 32, speculation on vs off), the JSONL files plus a small plotting script or notebook are usually clearer: latency CDFs per run, and throughput vs p95 TPOT curves as you sweep the request rate. Those curves are the standard way to compare serving configurations, since any engine can look good at one load level.
+In order, so a failure points at one thing:
 
-Finally, the unit test for `timing.py` is worth writing early: drive a `RequestTimes` with a fake clock through admit, preempt, readmit, three tokens, and finish, and assert queue time, TTFT, TPOT and ITL values exactly.
-## 8. Learning resources
+1. `curl -s localhost:8000/metrics | head -40` — the text format, served.
+2. `docker run --rm -v "$PWD/deploy/prometheus.yml:/c.yml" --entrypoint promtool prom/prometheus check config /c.yml` — catches a bad scrape config before the container silently starts with it.
+3. `docker compose -f deploy/docker-compose.yml up -d`, then `localhost:9090/targets` — the `miniserve` target must read **UP**. Down here is nearly always `host.docker.internal` (server bound to `127.0.0.1` instead of `0.0.0.0`) or the port.
+4. `localhost:9090` → query `miniserve_num_requests_running`. A result means scraping and storage both work.
+5. Send load (`miniserve/benchmarks/run.py`), then query
+   `histogram_quantile(0.95, sum by (le) (rate(miniserve_time_to_first_token_seconds_bucket[1m])))`.
+   `NaN` with data present means the `_bucket` series are not cumulative.
+6. `localhost:3000` — panels drawn from the same queries.
 
-Roughly the order worth reading them in. The sections above are the plan; these explain why it is shaped that way.
+An empty Grafana panel is almost always one of: the target is down, the `rate()`
+window is shorter than the scrape interval, no traffic in the window, or the
+`model_name` variable filtering on a value that isn't in the data.
 
-### Prometheus data model
+A unit test for the timestamp arithmetic pays for itself early: drive a request
+through admit → preempt → readmit → three tokens → finish with a fake clock, and
+assert queue time, TTFT, ITL and TPOT exactly. The readmit case is the one that
+breaks, and it breaks silently.
 
-What trips people up is not Grafana, it is understanding why counters plus `rate()` behave the way they do.
+## 8. Client-side numbers
 
-- [Metric types](https://prometheus.io/docs/concepts/metric_types/) — counter vs gauge vs histogram vs summary. Short, and the vocabulary everything else assumes.
-- [Histograms and summaries](https://prometheus.io/docs/practices/histograms/) — the most important page for this use case. Why `histogram_quantile` over bucket counters is an approximation, why bucket edges must be chosen up front, and why you cannot average quantiles across instances.
-- [How does a Prometheus histogram work?](https://www.robustperception.io/how-does-a-prometheus-histogram-work/) — Brian Brazil's blog. The whole archive is the best Prometheus writing available; also read his posts on `rate()` extrapolation and on cardinality.
-- [Metric and label naming](https://prometheus.io/docs/practices/naming/) — the `_seconds` and `_total` suffixes used in §4 come from here.
-- [Native histograms](https://prometheus.io/docs/specs/native_histograms/) — exponential, auto-scaling buckets, an alternative to the fixed edges in §4. Worth knowing it exists before hand-tuning TTFT and ITL buckets, though the classic buckets are the safer default for now.
+Server-side metrics exclude tokenization in the HTTP handler, network and SSE
+framing, so they always look better than what a client sees. Grafana is for
+watching a live server; comparing runs (prefix cache on/off, block size 16 vs
+32, speculation on/off) is better served by a load generator that records
+per-request TTFT and chunk arrival times to JSONL, plus a plotting script —
+latency CDFs per run, and throughput vs p95 TPOT as you sweep request rate.
+A single load level makes any engine look good.
 
-### PromQL
+Drive load at a fixed arrival rate (Poisson), not fixed concurrency. Fixed
+concurrency waits for the server before sending the next request, so queueing
+delay never gets measured — coordinated omission, and it flatters the numbers
+by a lot.
 
-- [Querying basics](https://prometheus.io/docs/prometheus/latest/querying/basics/), then [functions](https://prometheus.io/docs/prometheus/latest/querying/functions/). Focus on `rate`, `irate`, `increase`, `sum by`, `histogram_quantile`.
-- [PromLabs PromQL cheat sheet](https://promlabs.com/promql-cheat-sheet/) — they also have a free interactive "Must-Know PromQL" course.
+## 9. Reading
 
-The mental model to internalise: `rate()` needs a window of at least 4x the scrape interval, and `sum by (le) (rate(..._bucket[...]))` is the fixed incantation for percentiles. The queries in §6 are correct; knowing why they are shaped that way is what makes an empty panel quick to debug.
+Shortest path: histogram practices → PromQL cheat sheet → stand up §5 against
+the current `/metrics` → clone vLLM's dashboard JSON.
 
-### prometheus_client
-
-- [client_python docs](https://prometheus.github.io/client_python/) — `Counter`/`Gauge`/`Histogram`/`Info`, `generate_latest`, the ASGI app, and the multiprocess mode caveats. Those caveats matter if uvicorn ever runs with more than one worker, since gauges stop making sense.
-
-### Grafana
-
-- [Dashboards](https://grafana.com/docs/grafana/latest/dashboards/) — panels, variables, transformations.
-- [Provisioning](https://grafana.com/docs/grafana/latest/administration/provisioning/) — the authority on the datasource and dashboard YAML format used in §5.
-- [Heatmap panel](https://grafana.com/docs/grafana/latest/panels-visualizations/visualizations/heatmap/) — specifically the heatmap-from-histogram-buckets mode that the prompt length distribution panel needs. Easy to get wrong.
-- [Variables](https://grafana.com/docs/grafana/latest/dashboards/variables/) — for the `model_name` template variable.
-- [play.grafana.org](https://play.grafana.org) — live sandbox with real data. The fastest way to learn panel options is to edit an existing panel and read its JSON.
-
-Hand-writing dashboard JSON is miserable and the schema is undocumented in practice, so build in the UI and export from Dashboard settings → JSON Model.
-
-### LLM serving metrics
-
-Where the generic observability material stops helping.
-
-- [vLLM metrics design doc](https://docs.vllm.ai/en/latest/design/metrics.html) — the design rationale for the metric set §4 replicates, including what they chose not to measure and which metrics were dropped between v0 and v1.
-- vLLM's Grafana example, in the repo under `examples/online_serving/prometheus_grafana/` — the path has moved between releases, so search the repo for `grafana.json` if it 404s. Ships a working compose file, Prometheus config and dashboard JSON. Cloning that JSON and rewriting `vllm:` to `miniserve_` in the queries is a much faster start than building panels from scratch.
-- vLLM's `benchmarks/benchmark_serving.py` — the reference implementation of the load generator described in §7: Poisson arrivals, per-request TTFT/ITL/TPOT, percentile reporting. Read it before writing `benchmarks/load.py`; the arrival process and warmup details matter.
-- Gil Tene, [How NOT to Measure Latency](https://www.youtube.com/watch?v=lJ8ydIuPFeU) — 45 minutes, and the best time available to spend on this. Coordinated omission is why naive load generators report latencies that are too good, and it bites hard when driving load at a fixed concurrency rather than a fixed arrival rate.
-- [Brendan Gregg, the USE method](https://www.brendangregg.com/usemethod.html) — utilisation, saturation, errors as a checklist for what to instrument. The running and waiting gauges and KV usage are the saturation signals; this frames why.
-
-### Longer form
-
-- *Prometheus: Up & Running*, Brian Brazil, O'Reilly, 2nd ed. 2023 — one coherent pass instead of scattered pages.
-- Google SRE book, [ch. 6, Monitoring Distributed Systems](https://sre.google/sre-book/monitoring-distributed-systems/) — free online. Signals vs causes, and why distributions beat averages.
-
-### A path through it
-
-Histogram practices, then the PromQL cheat sheet, then stand up the compose stack in §5 against a hardcoded `/metrics`, then clone vLLM's dashboard JSON and adapt it. Read the vLLM design doc and Tene's talk before trusting any number the stack produces.
-
-The constraint that shapes the schema, repeating §6 because it is the expensive one to get wrong: Prometheus histograms cannot be correlated with each other after the fact. Any breakdown of TTFT by prompt size needs the label added at record time, and deciding label sets early is cheaper than migrating them later.
+- [Histograms and summaries](https://prometheus.io/docs/practices/histograms/) — the one page to read before §4. Why quantiles over buckets are approximate and why edges must be chosen up front.
+- [Metric types](https://prometheus.io/docs/concepts/metric_types/) and [naming](https://prometheus.io/docs/practices/naming/) — where the `_seconds` / `_total` conventions come from.
+- [How does a Prometheus histogram work?](https://www.robustperception.io/how-does-a-prometheus-histogram-work/) — Brian Brazil; also read his posts on `rate()` extrapolation and cardinality.
+- [PromQL cheat sheet](https://promlabs.com/promql-cheat-sheet/), then [functions](https://prometheus.io/docs/prometheus/latest/querying/functions/).
+- [Grafana provisioning](https://grafana.com/docs/grafana/latest/administration/provisioning/) — the authority on the YAML in §5. Plus [variables](https://grafana.com/docs/grafana/latest/dashboards/variables/) for `model_name`.
+- [vLLM metrics design doc](https://docs.vllm.ai/en/latest/design/metrics.html) — rationale for this metric set, including what they chose *not* to measure.
+- vLLM's `examples/online_serving/prometheus_grafana/` and `benchmarks/benchmark_serving.py` — working dashboard JSON, and the reference load generator for §8. Paths move between releases; search the repo.
+- Gil Tene, [How NOT to Measure Latency](https://www.youtube.com/watch?v=lJ8ydIuPFeU) — 45 minutes on why §8's arrival process matters.
+- [Native histograms](https://prometheus.io/docs/specs/native_histograms/) — auto-scaling buckets, worth knowing about before hand-tuning edges, though fixed buckets stay the safer default here.
