@@ -20,3 +20,7 @@ miniserve = "miniserve.cli:main"
 
 [dependency-groups]
 dev = ["httpx>=0.27", "pytest>=8.0", "textual>=1.0"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
