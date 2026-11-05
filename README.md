@@ -143,6 +143,12 @@ uv run main.py serve --model Qwen/Qwen3-0.6B --host 0.0.0.0 --port 8000
 # terminal 2: prometheus + grafana + loki + promtail in docker
 # (see docs/MONITORING.md; prometheus.yml points at host.docker.internal:8000)
 docker compose -f deploy/docker-compose.yml up -d
+
+# stop everything when done
+#   server: Ctrl+C (or `lsof -ti :8000 | xargs kill`)
+#   dashboard stack: stops the containers, but keeps their disk
+docker compose -f deploy/docker-compose.yml down
+colima stop            # only if you run docker through colima, not Docker Desktop
 ```
 
 Server log from that run (`output/miniserve-serve.log`):
@@ -247,37 +253,39 @@ Prometheus target page — `miniserve` is scraped every 5s through
 ### Architecture
 ```mermaid
 flowchart LR
-    client["OpenAI SDK / curl"]
+    client["OpenAI SDK / curl / tui.py"]
 
-    subgraph server["miniserve (FastAPI, single process)"]
+    subgraph server["miniserve (FastAPI + engine thread, one process)"]
         subgraph apilayer["api"]
-            app["create_app() + lifespan<br/>engine on app.state"]
-            routers["Routers<br/>/v1/chat/completions, /v1/completions,<br/>/v1/models, /health, /metrics"]
-            schemas["Pydantic schemas<br/>request validation"]
-            deps["get_engine dependency"]
+            app["create_app() + lifespan<br/>AsyncEngine on app.state"]
+            routers["Routers<br/>/v1/chat/completions, /v1/completions,<br/>/v1/models, /health, /stats, /metrics"]
+            schemas["Pydantic schemas<br/>validation, SamplingParams"]
+            deps["get_engine dependency<br/>errors.py APIError handlers"]
         end
 
         subgraph enginelayer["engine"]
-            aeng["AsyncEngine<br/>inbox queue + engine thread"]
-            eng["Engine.step()"]
-            detok["Detokenizer<br/>incremental UTF-8 safe"]
+            aeng["AsyncEngine<br/>inbox Queue, engine thread,<br/>per-request asyncio.Queue"]
+            eng["Engine.step()<br/>stop ids, token bookkeeping"]
+            detok["Detokenizer<br/>incremental, UTF-8 safe"]
+            met["EngineMetrics<br/>six histograms + finish counters"]
         end
 
         subgraph corelayer["core"]
-            sched["Scheduler<br/>continuous batching, chunked prefill,<br/>preemption"]
-            kv["KVCacheManager<br/>paged blocks, prefix cache, LRU"]
+            sched["Scheduler<br/>continuous batching, chunked prefill,<br/>token budget, preemption"]
+            kv["KVCacheManager<br/>paged blocks, chained hashes,<br/>refcounts, LRU free list"]
         end
 
-        subgraph runtime["runner + model (MPS)"]
-            runner["ModelRunner<br/>batch packing, slot mapping,<br/>KV cache sizing"]
-            model["Transformer<br/>fused qkv, RoPE, RMSNorm"]
-            attn["Attention backends<br/>paged_sdpa, torch_ref"]
-            samp["Sampler<br/>greedy, top-k, top-p"]
-            plat["platform<br/>MPS / CPU helpers"]
+        subgraph runtime["runner + model"]
+            runner["ModelRunner<br/>_prepare: slot mapping, block table<br/>KV sizing, optional CUDA graphs"]
+            fctx["forward_context<br/>ContextVar holding AttnMetadata"]
+            model["Model (transformer.py)<br/>fused qkv, RoPE, RMSNorm,<br/>SwiGLU MLP or MoE"]
+            attn["Attention backends<br/>sdpa (batched / per-request), torch ref"]
+            samp["sample()<br/>greedy, top-k, top-p, Gumbel-max"]
+            loader["loader.py + platform.py<br/>safetensors fusing, device/dtype"]
         end
     end
 
-    hf[("Hugging Face Hub<br/>safetensors, tokenizer")]
+    hf[("Hugging Face Hub<br/>safetensors, tokenizer, generation_config")]
 
     client -->|"HTTP / SSE"| routers
     routers --> schemas
@@ -285,12 +293,17 @@ flowchart LR
     app --> aeng
     aeng --> eng
     eng --> sched --> kv
-    eng --> runner --> model --> attn
+    eng --> runner
+    runner --> fctx
+    runner --> model --> attn
+    fctx -.->|"read by every layer"| attn
     runner --> samp
-    runner --> plat
     eng --> detok
-    detok -->|"stream deltas"| aeng
-    hf -.->|"weights at startup"| runner
+    eng --> met
+    routers -.->|"/stats, /metrics"| met
+    detok -->|"deltas inside Output"| aeng
+    loader --> model
+    hf -.->|"weights + tokenizer at startup"| loader
 ```
 
 ### Streaming Request LifeCycle
@@ -300,29 +313,84 @@ sequenceDiagram
     autonumber
     participant C as Client
     participant R as FastAPI router
-    participant A as AsyncEngine thread
-    participant S as Scheduler + KV cache
-    participant M as ModelRunner (MPS)
+    participant A as AsyncEngine (thread)
+    participant E as Engine.step()
+    participant S as Scheduler + KVCacheManager
+    participant M as ModelRunner + model
 
     C->>R: POST /v1/chat/completions (stream=true)
-    R->>R: validate schema, apply chat template, tokenize
-    alt prompt too long
-        R-->>C: 400 error
+    R->>R: validate body, apply chat template, tokenize
+    alt len(ids) >= max_model_len
+        R-->>C: 400 context_length_exceeded
     else valid
-        R->>A: inbox.put(add, request)
-        loop every engine step
-            A->>S: schedule()
-            S->>S: prefix cache lookup, allocate blocks, chunk prompt
-            A->>M: run(batch)
-            M->>M: write K/V, paged attention, sample
-            M-->>A: next tokens
-            A-->>R: Output via call_soon_threadsafe
+        R->>A: generate(): register asyncio.Queue, inbox.put(add, rid)
+        A->>E: add_request() on the engine thread
+        loop every engine step while has_work()
+            E->>S: schedule()
+            S->>S: running first: one decode token or the next prefill chunk,<br/>preempt the newest if KV is short;<br/>then admit waiting: find_cached_prefix() + allocate()
+            E->>M: run(batch)
+            M->>M: _prepare() buffers, index_copy_ K/V into pages,<br/>paged attention, logits for the last row per request, sample
+            M-->>E: next token ids
+            E->>E: append token, check EOS / max_tokens, detokenize delta
+            opt finished
+                E->>S: finish(reason): refcount--, blocks back to the LRU free list
+            end
+            E-->>A: list[Output]
+            A-->>R: loop.call_soon_threadsafe(queue.put_nowait, out)
             R-->>C: SSE chunk
         end
-        A->>S: finish(), blocks return to LRU free list
-        R-->>C: final chunk with usage, then DONE event
+        R-->>C: final chunk with finish_reason, optional usage, then [DONE]
+    end
+    opt client disconnects before the last token
+        R->>A: inbox.put(abort, rid)
+        A->>S: abort(): finish with reason abort, free blocks
     end
 ```
+
+### Scheduler
+
+The flowchart under [Engine](#engine) shows one call to `schedule()`. This is the
+other half: where a single request sits across many calls, and what happens to
+its pages at each move. `num_computed_tokens` is the whole state — how many of
+its tokens already have K/V in the pool — and the only transition that throws
+work away is preemption.
+
+```mermaid
+stateDiagram-v2
+    direction TB
+
+    state Running {
+        direction TB
+        Prefill: Prefilling<br/>num_computed_tokens behind num_tokens
+        Decode: Decoding<br/>num_computed_tokens caught up to num_tokens
+        Prefill --> Prefill: next chunk, n = min(prompt left, budget)<br/>completes_prompt false, so the sampled token is discarded<br/>K/V for the chunk is kept
+        Prefill --> Decode: the chunk reaches the final prompt token<br/>completes_prompt true, first real token sampled
+        Decode --> Decode: n = 1 per step, token appended to token_ids<br/>one more page allocated every block_size tokens
+    }
+
+    [*] --> Waiting: add(req), appended to the FIFO deque<br/>arrival stamped, holds no pages
+
+    Waiting --> Admit: phase 2 of a step, with budget left,<br/>running below max_num_seqs,<br/>and nothing was preempted this step
+    Admit --> Waiting: allocate() returned False<br/>admission stops for this step, req keeps the head of the queue
+    Admit --> Prefill: find_cached_prefix() then allocate(req, n, cached)<br/>cached pages refcount++, reclaimed from the free list<br/>new pages popped off the LRU front<br/>num_computed_tokens = hit blocks x block_size<br/>first_scheduled stamped once, appended to running
+
+    Running --> Waiting: preempted in phase 1 when allocate() cannot fit<br/>victim is the newest running request<br/>free_request(): refcount--, pages to the free-list tail<br/>num_computed_tokens reset to 0, requeued at the FRONT<br/>its budget is refunded and no one new is admitted
+    Running --> Finished: finish(reason) from Engine.step()<br/>EOS unless ignore_eos, max_tokens, max_model_len,<br/>or abort when the client disconnects
+    Waiting --> Finished: abort() while still queued
+
+    Finished --> [*]: dropped from running or waiting, free_request()<br/>hash_to_block entries survive, so the next request<br/>with the same prefix still hits them
+```
+
+Two details the diagram encodes that are easy to miss in the code:
+
+- A preempted request goes to the **front** of the queue, not the back, and its
+  `num_computed_tokens` goes to zero — it re-prefills. That is usually cheap,
+  because `free_request()` only drops refcounts and the pages keep their hashes,
+  so `find_cached_prefix()` normally hands most of the prompt straight back.
+  `num_cached_tokens` is kept as a `max()` for that reason.
+- A request that cannot fit even when it is the only one running preempts
+  *itself*, is skipped for the step, and is retried from the queue. That is the
+  one case where preemption does not make room for anybody.
 
 ### Engine
 
@@ -330,41 +398,53 @@ sequenceDiagram
 flowchart TB
     start(["Engine.step()"]) --> p1
 
-    subgraph schedule["Scheduler.schedule()"]
-        p1["Phase 1: running sequences<br/>reserve 1 decode token or next prefill chunk"]
-        fit1{"KV blocks available?"}
-        pre["Preempt newest running sequence<br/>free blocks, requeue at front"]
-        p2["Phase 2: admit waiting (FIFO)<br/>only if nothing was preempted"]
-        hit["Prefix cache lookup<br/>chained block hashes"]
-        fit2{"allocate() ok?"}
+    subgraph schedule["Scheduler.schedule(), budget = max_num_batched_tokens"]
+        p1["Phase 1: running requests, in order<br/>n = min(tokens not yet computed, budget)<br/>1 while decoding, a chunk while prefilling"]
+        fit1{"kv.allocate(req, n)?"}
+        pre["Preempt the newest running request<br/>free its blocks, reset num_computed_tokens,<br/>requeue at the front, refund its budget"]
+        victim{"was the victim req itself?"}
+        more{"more running, budget left?"}
+        p2["Phase 2: admit waiting (FIFO)<br/>only if nothing was preempted, and<br/>budget > 0 and running < max_num_seqs"]
+        hit["kv.find_cached_prefix()<br/>chained block hashes, whole blocks,<br/>always leaves >= 1 token to compute"]
+        fit2{"kv.allocate(req, n, cached)?"}
+
         p1 --> fit1
-        fit1 -->|"no"| pre --> fit1
-        fit1 -->|"yes"| p2
+        fit1 -->|"no"| pre --> victim
+        victim -->|"no, retry req"| fit1
+        fit1 -->|"yes"| more
+        victim -->|"yes, it outgrew the cache"| more
+        more -->|"yes"| p1
+        more -->|"no"| p2
         p2 --> hit --> fit2
-        fit2 -->|"yes, try next"| p2
+        fit2 -->|"yes: admit, try the next one"| p2
     end
 
-    fit2 -->|"no, stop admitting"| batch
-    p2 -->|"queue empty or budget spent"| batch
+    fit2 -->|"no: stop admitting"| batch
+    p2 -->|"queue empty, budget spent, or at max_num_seqs"| batch
 
-    batch["Batch of ScheduledSequence<br/>num_computed, num_new"] --> prep
-    prep["ModelRunner.prepare()<br/>input_ids, positions, slot_mapping,<br/>query_start_loc, block_table"] --> fwd
+    batch["list[ScheduledRequest]<br/>num_computed, num_new<br/>num_computed_tokens advanced optimistically"] --> prep
+    prep["ModelRunner._prepare()<br/>input_ids, positions, slot_mapping,<br/>query_start_loc, cu_seqlens_k, block_table<br/>-> AttnMetadata bound in the forward context"] --> cg
+    cg{"every num_new == 1<br/>and decode graphs captured?"}
+    cg -->|"yes (CUDA only)"| replay["graph.replay() over the persistent buffers"]
+    cg -->|"no"| fwd
 
-    subgraph forward["Model forward, per layer"]
-        fwd["qkv projection + RoPE"] --> write["index_copy_ new K/V into paged cache"]
-        write --> kind{"all q_len == 1?"}
-        kind -->|"decode"| dec["Batched paged SDPA<br/>single gather, padding mask"]
-        kind -->|"prefill / mixed"| pf["Per-sequence SDPA<br/>bottom-right causal mask"]
-        dec --> mlp["o_proj + MLP"]
+    subgraph forward["Model forward, per decoder layer"]
+        fwd["fused qkv projection, optional q/k norm, RoPE"] --> write["index_copy_ the new K/V into the paged pool<br/>slot = block_id * block_size + offset"]
+        write --> kind{"all query lengths equal?"}
+        kind -->|"yes"| dec["Batched SDPA<br/>gather + pad each request's pages;<br/>pure decode with equal kv_len runs maskless"]
+        kind -->|"no, mixed prefill/decode"| pf["Per-request SDPA<br/>bottom-right causal mask"]
+        dec --> mlp["o_proj + SwiGLU MLP (or MoE)"]
         pf --> mlp
     end
 
-    mlp --> samp["Sampler<br/>greedy, top-k, top-p"]
-    samp --> done{"completes prompt?"}
-    done -->|"no, mid-prompt chunk"| drop["Discard sample"]
-    done -->|"yes"| commit["Append token, detokenize"]
-    commit --> stop{"EOS or max_tokens?"}
-    stop -->|"yes"| fin["finish(): free blocks to LRU<br/>hashes stay reusable"]
+    replay --> head
+    mlp --> head
+    head["logits: last packed row of each request<br/>through the tied embedding or lm_head"] --> samp["sample()<br/>greedy, or temperature + top-k/top-p + Gumbel-max"]
+    samp --> done{"completes_prompt?"}
+    done -->|"no, mid-prompt chunk"| drop["Discard the sample<br/>its K/V is already in the cache"]
+    done -->|"yes"| commit["Append token, observe TTFT / ITL, detokenize delta"]
+    commit --> stop{"EOS (unless ignore_eos),<br/>max_tokens, or max_model_len?"}
+    stop -->|"yes"| fin["finish(reason): refcount--,<br/>blocks to the LRU free list,<br/>their hashes stay reusable until the page is taken"]
     stop -->|"no"| nextstep(["next step"])
     drop --> nextstep
     fin --> nextstep
