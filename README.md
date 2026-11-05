@@ -378,7 +378,7 @@ sequenceDiagram
         A->>E: add_request() on the engine thread
         loop every engine step while has_work()
             E->>S: schedule()
-            S->>S: running first: one decode token or the next prefill chunk,<br/>preempt the newest if KV is short;<br/>then admit waiting: find_cached_prefix() + allocate()
+            S->>S: running first: one decode token or the next prefill chunk,<br/>preempt the newest if KV is short,<br/>then admit waiting: find_cached_prefix() + allocate()
             E->>M: run(batch)
             M->>M: _prepare() buffers, index_copy_ K/V into pages,<br/>paged attention, logits for the last row per request, sample
             M-->>E: next token ids
@@ -482,7 +482,7 @@ flowchart TB
     subgraph forward["Model forward, per decoder layer"]
         fwd["fused qkv projection, optional q/k norm, RoPE"] --> write["index_copy_ the new K/V into the paged pool<br/>slot = block_id * block_size + offset"]
         write --> kind{"all query lengths equal?"}
-        kind -->|"yes"| dec["Batched SDPA<br/>gather + pad each request's pages;<br/>pure decode with equal kv_len runs maskless"]
+        kind -->|"yes"| dec["Batched SDPA<br/>gather + pad each request's pages,<br/>pure decode with equal kv_len runs maskless"]
         kind -->|"no, mixed prefill/decode"| pf["Per-request SDPA<br/>bottom-right causal mask"]
         dec --> mlp["o_proj + SwiGLU MLP (or MoE)"]
         pf --> mlp
