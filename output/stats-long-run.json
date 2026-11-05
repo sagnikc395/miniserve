@@ -1,0 +1,21 @@
+{
+    "model": "Qwen/Qwen3-0.6B",
+    "started_at": 1793851956.010871,
+    "uptime_s": 241.14344310760498,
+    "requests": 32,
+    "finished": 32,
+    "running": 0,
+    "waiting": 0,
+    "prompt_tokens": 31133,
+    "generated_tokens": 4096,
+    "cached_tokens": 1488,
+    "steps": 271,
+    "last_step_tokens": 1,
+    "preemptions": 0,
+    "kv_used_blocks": 0,
+    "kv_total_blocks": 4939,
+    "kv_usage_ratio": 0.0,
+    "finished_reasons": {
+        "length": 32
+    }
+}

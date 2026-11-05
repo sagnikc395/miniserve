@@ -250,6 +250,57 @@ Prometheus target page — `miniserve` is scraped every 5s through
 
 ![Prometheus targets](output/screenshots/prometheus-targets.png)
 
+### Experiments
+
+**Long-context load — 32 requests, ~4.6 KB prompts each, `--max-model-len 8192`.**
+The demo burst above peaked the KV panels at 2.7%, which proves the plumbing but
+not the scheduler. This run gives it real work: 32 requests arriving Poisson
+(0.3s mean gap), prompts grown to ~970 tokens each, 128 output tokens, server at
+`--max-model-len 8192` (KV pool 4940 blocks):
+
+```bash
+uv run main.py serve --model Qwen/Qwen3-0.6B --host 0.0.0.0 --port 8000 --max-model-len 8192
+
+LOAD_REQUESTS=32 LOAD_GAP=0.3 LOAD_PROMPT_CHARS=4600 LOAD_MAX_TOKENS=128 \
+LOAD_TIMEOUT=300 LOAD_OUT=output/load-run-long.jsonl .venv/bin/python demos/load_client.py
+```
+
+Two lessons came out of the first two attempts, both worth keeping:
+
+1. **A 120s client timeout kills 32-request bursts.** The engine admits 16
+   sequences at a time and runs each wave to lock-step completion, so with equal
+   prompt lengths the clients see two waves: wave 1 finishes ~79–89s, wave 2
+   ~154–158s after arrival. Half the first-attempt requests died with
+   `httpx.ReadTimeout` at exactly 120s while the engine happily finished all 32
+   — server logs showed 32 × `200 OK` only because uvicorn logs when the
+   response *starts*. Fix: the client timeout is now `LOAD_TIMEOUT` (default
+   300s), sized for multi-wave MPS decode.
+2. **Shared prompt bodies fake the KV story.** The first long-prompt generator
+   repeated one document body, so 28,272 of 30,384 prompt tokens (93%) came from
+   the prefix cache, KV peaked at 4.7%, and the run measured the cache, not the
+   pool. `build_prompt` now interleaves a unique `SLOTiii` tag every ~800-char
+   chunk so no two requests share a block: cache hit drops to **4.8%** (only the
+   ~48-token chat template), and prefill becomes real compute.
+
+What the clean run looks like (32/32 finished, reason `length`, 0 preemptions):
+
+```text
+requests=32 wall=157.88s out_tok=4096 out_tok/s=25.9
+client e2e: wave 1 78.6–88.8s (16 reqs) · wave 2 154.3–158.2s (16 reqs)
+server: 31,133 prompt tok (mean 972/req) · 4,096 gen · 271 steps · cached 1,488 (4.8%)
+KV peak ~20.6–21.4% (~1,057/4,939 blocks): 16 admitted × ~1,050 tok/wave —
+        the other 16 wait (scheduler slot cap, not KV pressure) and hold no blocks
+ITL p95 ~1s mid-run vs ~470ms in the short-prompt burst (longer context = pricier attention)
+```
+
+![Grafana dashboard mid long-context run](output/screenshots/grafana-dashboard-long-context.png)
+
+Gauge at 20.6% under the model label with wave 2 still running; watch the
+running/waiting panel show the two waves and the usage-over-time plateau.
+Artifacts: `output/load-run-long.jsonl` (per-request e2e + usage incl.
+`cached_tokens`), `output/long-run-summary.txt`, `output/stats-long-run.json`,
+`output/metrics-long-run.txt`.
+
 ### Architecture
 ```mermaid
 flowchart LR

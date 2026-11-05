@@ -28,6 +28,33 @@ PROMPTS = [
 ]
 
 STREAMING = ["Explain paged attention in one paragraph.", "List three uses of prefix caching."]
+_TOPIC = (
+    "Consider a serving stack with paged KV cache, continuous batching and "
+    "chunked prefill. The scheduler admits requests while KV blocks remain, "
+    "chunks prompts into the token budget, and preempts the newest sequence "
+    "on pressure. "
+)
+
+
+def build_prompt(i: int) -> str:
+    """LOAD_PROMPT_CHARS > 0 grows each prompt to ~ that many characters.
+
+    Per-index filler tags are interleaved throughout the body so no two
+    requests share a full block: prefix-cache hits drop to ~nothing and the
+    run measures real prefill compute and KV pressure.
+    """
+    target = int(os.environ.get("LOAD_PROMPT_CHARS", "0"))
+    if target <= 0:
+        return PROMPTS[i % len(PROMPTS)]
+    rng = random.Random(1234 + i)
+    chunks = []
+    consumed = 0
+    while consumed < target:
+        # unique token inside each ~800-char chunk breaks every shared block
+        chunk = (_TOPIC + f"SLOT{i:03d} ") * 11 + f"\n{rng.getrandbits(48):x}\n"
+        chunks.append(chunk[: max(200, target - consumed)])
+        consumed += len(chunks[-1])
+    return "Summarize the following document in one sentence.\n\n" + "".join(chunks)
 
 
 async def chat(client: httpx.AsyncClient, prompt: str, stream: bool, max_tokens: int = None):
@@ -83,19 +110,22 @@ async def chat(client: httpx.AsyncClient, prompt: str, stream: bool, max_tokens:
 async def main():
     rng = random.Random(0)
     results = []
-    async with httpx.AsyncClient(base_url=BASE, timeout=120) as client:
+    # long-context bursts run 2-3 min on MPS; default 300s covers them
+    timeout = httpx.Timeout(float(os.environ.get("LOAD_TIMEOUT", "300")))
+    async with httpx.AsyncClient(base_url=BASE, timeout=timeout) as client:
         t0 = time.perf_counter()
         tasks = []
         for i in range(NUM_REQUESTS):
             gap = rng.expovariate(1 / MEAN_GAP_S)
-            prompt = PROMPTS[i % len(PROMPTS)]
+            prompt = build_prompt(i)
             stream = prompt in STREAMING
             tasks.append(
                 _delayed(client, prompt, stream, gap)
             )
         results = await asyncio.gather(*tasks)
 
-    with open("output/load-run.jsonl", "w") as f:
+    out = os.environ.get("LOAD_OUT", "output/load-run.jsonl")
+    with open(out, "w") as f:
         for r in results:
             f.write(json.dumps(r) + "\n")
 
