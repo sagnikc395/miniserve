@@ -74,6 +74,13 @@ def _bench_engine(cfg: EngineConfig, num_prompts: int, max_tokens: int) -> dict:
 
     latencies = [last[rid] - arrivals[rid] for rid in arrivals if rid in last]
     ttfts = [first[rid] - arrivals[rid] for rid in arrivals if rid in first]
+    # TPOT over every request with >= 2 committed tokens; single-token
+    # requests are skipped, same rule as EngineMetrics.observe_finish
+    tpots = [
+        (last[rid] - first[rid]) / (len(latest[rid].token_ids) - 1)
+        for rid in first
+        if rid in last and len(latest[rid].token_ids) >= 2
+    ]
     generated = sum(len(out.token_ids) for out in latest.values())
     prompt_tokens = sum(out.num_prompt_tokens for out in latest.values())
     cached = sum(out.num_cached_tokens for out in latest.values())
@@ -95,10 +102,72 @@ def _bench_engine(cfg: EngineConfig, num_prompts: int, max_tokens: int) -> dict:
         "p50_latency_s": percentile(latencies, 50),
         "p90_latency_s": percentile(latencies, 90),
         "p50_ttft_s": percentile(ttfts, 50),
+        "p50_tpot_s": percentile(tpots, 50),
         "prompt_tokens": prompt_tokens,
         "generated_tokens": generated,
         "cached_tokens": cached,
         "preemptions": preemptions,
+    }
+
+
+def _bench_serial(cfg: EngineConfig, num_prompts: int, max_tokens: int) -> dict:
+    """One request at a time, so prefill and decode never share a wall-clock
+    window: each gets its own throughput. The batch benchmark interleaves
+    them by design, so the split only exists serially.
+
+    Timings reuse the Request.arrival / first_token / last_token timestamps
+    that Engine.step records after the sampler `.tolist()` sync, so on MPS
+    they are real GPU-complete times and match the Prometheus definitions
+    (docs/MONITORING.md §2-3). Zero new clock code here.
+    """
+    # prompts share a system prefix and cycle instructions, so prefix caching
+    # would turn later prefills into cache hits and fake a near-free prefill;
+    # hardware ceilings need none
+    cfg = dataclasses.replace(cfg, enable_prefix_caching=False)
+    engine = Engine(cfg)
+    prompts = build_prompts(num_prompts, engine.tokenizer)
+    _warmup(engine)
+
+    ttfts = []
+    tpots = []
+    prompt_tokens = []  # per request, aligned with ttfts
+    decode_tokens = []
+    decode_seconds = []
+
+    for prompt in prompts:
+        rid = engine.add_request(
+            prompt, SamplingParams(temperature=0.0, max_tokens=max_tokens)
+        )
+        # keep the ref: finished requests are popped from engine.requests
+        req = engine.requests[rid]
+        _drain(engine)
+
+        if req.first_token is None:
+            continue  # never ran (cache too small etc.); reported below
+        ttfts.append(req.first_token - req.arrival)
+        prompt_tokens.append(req.prompt_len)
+        n = len(req.output_ids)
+        if n >= 2 and req.last_token is not None:
+            tpots.append((req.last_token - req.first_token) / (n - 1))
+            decode_seconds.append(req.last_token - req.first_token)
+            decode_tokens.append(n - 1)
+
+    del engine
+    gc.collect()
+    empty_device_cache(cfg.device)
+
+    return {
+        "name": "serial (1 request at a time)",
+        "requests": len(prompts),
+        "unfinished": len(prompts) - len(ttfts),
+        "prompt_tokens": sum(prompt_tokens),
+        "p50_ttft_s": percentile(ttfts, 50),
+        "p50_tpot_s": percentile(tpots, 50),
+        # prefill speed = prompt_len / TTFT: the first token only commits
+        # after the last chunk, so TTFT covers the whole prompt even when the
+        # scheduler prefills it in chunks
+        "prefill_tok_per_s": per_second(sum(prompt_tokens), sum(ttfts)),
+        "decode_tok_per_s": per_second(sum(decode_tokens), sum(decode_seconds)),
     }
 
 
@@ -111,7 +180,7 @@ def _cell(value, width: int, fmt: str) -> str:
 def _print_table(results: list[dict]) -> None:
     header = (
         f"{'run':<24} {'req/s':>8} {'out tok/s':>10} {'tot tok/s':>10} "
-        f"{'p50 ttft':>9} {'p50 lat':>9} {'p90 lat':>9} {'cached':>8}"
+        f"{'p50 ttft':>9} {'p50 tpot':>9} {'p50 lat':>9} {'p90 lat':>9} {'cached':>8}"
     )
     print(header)
     print("-" * len(header))
@@ -126,6 +195,7 @@ def _print_table(results: list[dict]) -> None:
             f"{_cell(result.get('output_tok_per_s'), 10, '.2f')} "
             f"{_cell(result.get('total_tok_per_s'), 10, '.2f')} "
             f"{_cell(result.get('p50_ttft_s'), 9, '.3f')} "
+            f"{_cell(result.get('p50_tpot_s'), 9, '.3f')} "
             f"{_cell(result.get('p50_latency_s'), 9, '.3f')} "
             f"{_cell(result.get('p90_latency_s'), 9, '.3f')} "
             f"{cached_pct:>7.1f}%"
@@ -134,6 +204,25 @@ def _print_table(results: list[dict]) -> None:
             print(
                 f"  ! {result['unfinished']} of {result['requests']} requests did not finish"
             )
+
+
+def _print_serial(result: dict) -> None:
+    header = (
+        f"{'serial':<24} {'p50 ttft':>9} {'p50 tpot':>9} "
+        f"{'prefill t/s':>11} {'decode t/s':>10}"
+    )
+    print()
+    print(header)
+    print("-" * len(header))
+    print(
+        f"{result['name']:<24} "
+        f"{_cell(result.get('p50_ttft_s'), 9, '.3f')} "
+        f"{_cell(result.get('p50_tpot_s'), 9, '.3f')} "
+        f"{_cell(result.get('prefill_tok_per_s'), 11, '.1f')} "
+        f"{_cell(result.get('decode_tok_per_s'), 10, '.1f')}"
+    )
+    if result.get("unfinished"):
+        print(f"  ! {result['unfinished']} of {result['requests']} requests never ran")
 
 
 def run_benchmark(
@@ -178,4 +267,6 @@ def run_benchmark(
             print(f"[bench] HF baseline skipped: {exc}")
 
     _print_table(results)
-    return results
+    serial = _bench_serial(cfg, num_prompts, max_tokens)
+    _print_serial(serial)
+    return [*results, serial]
