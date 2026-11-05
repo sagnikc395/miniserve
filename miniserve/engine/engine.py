@@ -13,6 +13,7 @@ from transformers.models.auto.tokenization_auto import AutoTokenizer
 from miniserve.core.kv_cache import KVCacheManager
 from miniserve.core.scheduler import Scheduler
 from miniserve.core.sequence import Request
+from miniserve.metrics import EngineMetrics
 from miniserve.runner.model_runner import ModelRunner
 from miniserve.sampling import SamplingParams
 
@@ -96,6 +97,7 @@ class Engine:
         # setup storage for the rest
         self.detok: dict[str, Detokenizer] = {}
         self.requests: dict[str, Request] = {}
+        self.m = EngineMetrics()
 
         self.started_at = time.time()
         self.num_requests = 0
@@ -136,6 +138,9 @@ class Engine:
         req = self.requests.pop(request_id, None)
         if req is not None and not req.finished:
             self.scheduler.finish(req, "abort")
+            self.num_finished += 1
+            m = self.m.finished
+            m["abort"] = m.get("abort", 0) + 1
         self.detok.pop(request_id, None)
 
     def has_work(self):
@@ -143,11 +148,15 @@ class Engine:
 
     @torch.inference_mode()
     def step(self):
+        start = time.perf_counter()
         batch = self.scheduler.schedule()
         if not batch:
             return []
 
         tokens, logits = self.runner.run(batch)
+        # after run(): the sampler ends in .tolist(), which forced the sync, so
+        # `now` reflects real GPU completion (docs/MONITORING.md §2)
+        now = time.perf_counter()
 
         outputs = []
         for i, (s, tok) in enumerate(zip(batch, tokens)):
@@ -165,6 +174,11 @@ class Engine:
 
             req.token_ids.append(tok)
             n_out = len(req.output_ids)
+
+            if req.first_token is None:
+                self.m.observe_first_token(req, now)
+            else:
+                self.m.observe_next_token(req, now)
 
             # stop conditions: EOS (unless ignored) or no token space left
             if tok in self.stop_ids and not req.params.ignore_eos:
@@ -191,11 +205,13 @@ class Engine:
             if req.finished:
                 self.num_finished += 1
                 self.num_cached_tokens += req.num_cached_tokens
+                self.m.observe_finish(req, now)
                 self.requests.pop(req.request_id, None)
                 self.detok.pop(req.request_id, None)
 
         self.num_steps += 1
         self.last_step_tokens = sum(s.num_new for s in batch)
+        self.m.step_duration.observe(time.perf_counter() - start)
         return outputs
 
     def stats(self) -> dict:
@@ -218,6 +234,7 @@ class Engine:
             "kv_used_blocks": used_blocks,
             "kv_total_blocks": total_blocks,
             "kv_usage_ratio": used_blocks / total_blocks if total_blocks else 0.0,
+            "finished_reasons": dict(self.m.finished),
         }
 
 

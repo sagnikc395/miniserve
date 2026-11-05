@@ -1,0 +1,1 @@
+{"model":"Qwen/Qwen3-0.6B","started_at":1793848328.1584132,"uptime_s":53.04459881782532,"requests":2,"finished":2,"running":0,"waiting":0,"prompt_tokens":33,"generated_tokens":320,"cached_tokens":0,"steps":320,"last_step_tokens":1,"preemptions":0,"kv_used_blocks":0,"kv_total_blocks":4096,"kv_usage_ratio":0.0,"finished_reasons":{"length":2}}

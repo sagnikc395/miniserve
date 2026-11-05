@@ -1,0 +1,196 @@
+{
+  "title": "miniserve",
+  "uid": "miniserve",
+  "schemaVersion": 40,
+  "version": 1,
+  "editable": true,
+  "refresh": "5s",
+  "time": { "from": "now-30m", "to": "now" },
+  "tags": ["miniserve"],
+  "templating": {
+    "list": [
+      {
+        "name": "model_name",
+        "type": "query",
+        "label": "model",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": {
+          "query": "label_values(miniserve_num_requests_running, model_name)",
+          "refId": "var-model_name"
+        },
+        "refresh": 1,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": { "text": "All", "value": "$__all" },
+        "options": []
+      }
+    ]
+  },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "TTFT p50/p95/p99",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineInterpolation": "smooth" } }, "overrides": [] },
+      "options": { "legend": { "showLegend": true, "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.50, sum by (le) (rate(miniserve_time_to_first_token_seconds_bucket{model=~\"$model_name\"}[1m])))", "legendFormat": "p50" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(miniserve_time_to_first_token_seconds_bucket{model=~\"$model_name\"}[1m])))", "legendFormat": "p95" },
+        { "refId": "C", "expr": "histogram_quantile(0.99, sum by (le) (rate(miniserve_time_to_first_token_seconds_bucket{model=~\"$model_name\"}[1m])))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "TPOT p50/p95",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineInterpolation": "smooth" } }, "overrides": [] },
+      "options": { "legend": { "showLegend": true, "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.50, sum by (le) (rate(miniserve_time_per_output_token_seconds_bucket{model=~\"$model_name\"}[1m])))", "legendFormat": "p50" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(miniserve_time_per_output_token_seconds_bucket{model=~\"$model_name\"}[1m])))", "legendFormat": "p95" }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "E2E request latency p95",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineInterpolation": "smooth" } }, "overrides": [] },
+      "options": { "legend": { "showLegend": false }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.95, sum by (le) (rate(miniserve_e2e_request_latency_seconds_bucket{model=~\"$model_name\"}[1m])))", "legendFormat": "p95" }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Queue time p95",
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineInterpolation": "smooth" } }, "overrides": [] },
+      "options": { "legend": { "showLegend": false }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.95, sum by (le) (rate(miniserve_request_queue_time_seconds_bucket{model=~\"$model_name\"}[1m])))", "legendFormat": "p95" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Step time p95",
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineInterpolation": "smooth" } }, "overrides": [] },
+      "options": { "legend": { "showLegend": false }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.95, sum by (le) (rate(miniserve_step_duration_seconds_bucket{model=~\"$model_name\"}[1m])))", "legendFormat": "p95" }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Output tokens/s",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "lineInterpolation": "smooth" } }, "overrides": [] },
+      "options": { "legend": { "showLegend": false }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(miniserve_generation_tokens_total{model=~\"$model_name\"}[1m]))", "legendFormat": "out tok/s" },
+        { "refId": "B", "expr": "sum(rate(miniserve_prompt_tokens_total{model=~\"$model_name\"}[1m]))", "legendFormat": "prompt tok/s" }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Request rate by finish reason",
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "lineInterpolation": "smooth" } }, "overrides": [] },
+      "options": { "legend": { "showLegend": true, "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "sum by (reason) (rate(miniserve_requests_finished_total{model=~\"$model_name\"}[1m]))", "legendFormat": "{{reason}}" },
+        { "refId": "B", "expr": "sum(rate(miniserve_requests_finished_total{model=~\"$model_name\"}[1m]))", "legendFormat": "total" }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Running / waiting",
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "lineInterpolation": "stepAfter" } }, "overrides": [] },
+      "options": { "legend": { "showLegend": true, "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "miniserve_num_requests_running{model=~\"$model_name\"}", "legendFormat": "running" },
+        { "refId": "B", "expr": "miniserve_num_requests_waiting{model=~\"$model_name\"}", "legendFormat": "waiting" }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "gauge",
+      "title": "KV cache usage",
+      "gridPos": { "h": 7, "w": 4, "x": 0, "y": 21 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "percentunit", "min": 0, "max": 1 },
+        "overrides": []
+      },
+      "options": { "showSweepingGauge": true, "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto" },
+      "targets": [
+        { "refId": "A", "expr": "miniserve_kv_cache_usage_ratio{model=~\"$model_name\"}" }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "Mean TTFT",
+      "gridPos": { "h": 7, "w": 4, "x": 4, "y": 21 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        { "refId": "A", "expr": "rate(miniserve_time_to_first_token_seconds_sum{model=~\"$model_name\"}[1m]) / rate(miniserve_time_to_first_token_seconds_count{model=~\"$model_name\"}[1m])" }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "Prefix cache hit rate",
+      "gridPos": { "h": 7, "w": 4, "x": 8, "y": 21 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        { "refId": "A", "expr": "rate(miniserve_prefix_cache_hit_tokens_total{model=~\"$model_name\"}[5m]) / rate(miniserve_prompt_tokens_total{model=~\"$model_name\"}[5m])" }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Batch fill (last step) & preemptions",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 21 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "lineInterpolation": "smooth" } }, "overrides": [] },
+      "options": { "legend": { "showLegend": true, "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "miniserve_step_batched_tokens{model=~\"$model_name\"}", "legendFormat": "batched tokens" },
+        { "refId": "B", "expr": "sum(rate(miniserve_preemptions_total{model=~\"$model_name\"}[1m]))", "legendFormat": "preemptions/s" }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "logs",
+      "title": "serve logs (Loki)",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 28 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "options": { "showTime": true, "showLabels": false, "wrapLogMessage": true, "sortOrder": "Descending" },
+      "targets": [{ "refId": "A", "expr": "{job=\"miniserve\"}" }]
+    }
+  ]
+}

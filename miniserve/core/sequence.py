@@ -1,3 +1,5 @@
+import time
+
 import torch
 
 from miniserve.sampling import SamplingParams
@@ -29,6 +31,13 @@ class Request:
 
         self.block_hashes: list[int] = []
         self.num_cached_tokens = 0  # prefix-cache hits at admission
+
+        # perf_counter timestamps, only differences between them mean anything
+        # (docs/MONITORING.md §3)
+        self.arrival = time.perf_counter()
+        self.first_scheduled: float | None = None
+        self.first_token: float | None = None
+        self.last_token: float | None = None
         self.logprobs: list[torch.Tensor] = []
         self.finished = False
         self.finish_reason: str | None = None

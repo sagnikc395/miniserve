@@ -1,5 +1,6 @@
 from collections import deque
 from dataclasses import dataclass
+import time
 
 from miniserve.config import EngineConfig
 from miniserve.core.kv_cache import KVCacheManager
@@ -113,6 +114,10 @@ class Scheduler:
                 break
 
             self.waiting.popleft()
+            if req.first_scheduled is None:
+                # once only: a preempted (readmitted) request would otherwise
+                # report a near-zero queue time (docs/MONITORING.md §3)
+                req.first_scheduled = time.perf_counter()
 
             req.num_computed_tokens = len(cached) * self.cfg.block_size
             # if some request can get evicted we can recompute and keep track of what the best cache hit we had

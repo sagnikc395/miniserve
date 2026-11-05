@@ -129,6 +129,111 @@ uv run main.py kv-demo      # step through the KV cache manager by hand
 uv run pytest               # test suite
 ```
 
+### Sample Run
+
+Everything below is a real run on an M-series Mac (MPS): the server
+serving `Qwen/Qwen3-0.6B`, two traffic bursts, and the monitoring stack
+grinding through it. Full artifacts (raw SSE, JSON bodies, log, JSONL timings,
+screenshots) live in `output/`.
+
+```bash
+# terminal 1: the server itself (needs MPS, so it runs natively)
+uv run main.py serve --model Qwen/Qwen3-0.6B --host 0.0.0.0 --port 8000
+
+# terminal 2: prometheus + grafana + loki + promtail in docker
+# (see docs/MONITORING.md; prometheus.yml points at host.docker.internal:8000)
+docker compose -f deploy/docker-compose.yml up -d
+```
+
+Server log from that run (`output/miniserve-serve.log`):
+
+```text
+[miniserve] serving Qwen/Qwen3-0.6B on http://0.0.0.0:8000 (mps, sdpa)
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+[miniserve] KV Cache: 4097 blocks x 16 tokens = 65552 tokens (7.0 GB)
+INFO:     127.0.0.1:54829 - "GET /metrics HTTP/1.1" 200 OK
+```
+
+Input/output pair, captured via curl (`output/input-chat-completions.json` →
+`output/output-chat-completions.json`):
+
+```json
+// input
+{"model": "Qwen/Qwen3-0.6B",
+ "messages": [{"role": "user",
+               "content": "Explain page tables and paged attention in five sentences for a systems programmer."}],
+ "max_tokens": 200, "temperature": 0.7}
+```
+
+```jsonc
+// output (excerpt) — Qwen3-0.6B runs in thinking mode here, the plan text is its own
+{"id":"chatcmpl-23b0e48c65da4664a0e88e8aec44b921","object":"chat.completion",
+ "model":"Qwen/Qwen3-0.6B",
+ "choices":[{"index":0,"message":{"role":"assistant",
+   "content":"\nOkay, the user wants me to explain page tables and paged attention..."},
+   "finish_reason":"length"}],
+ "usage":{"prompt_tokens":24,"completion_tokens":200,"total_tokens":224,
+          "prompt_tokens_details":{"cached_tokens":0}}}
+```
+
+Streaming/SSE capture with the request on top:
+`output/input-and-output-chat-stream.sse`.
+
+Load was driven with `demos/load_client.py`, which fires 24 requests at
+Poisson arrivals (mean gap 350ms) and records per-request client timings to
+`output/load-run.jsonl` — client-side numbers include network + SSE framing, so
+they sit above the server-side histograms on purpose:
+
+```text
+requests=24 wall=23s  out_tok=1920  out_tok/s=83.6
+client ttft p50/p95: 22.5s / 22.6s      # saturated burst: everyone queues
+client e2e  p50/p95: 22.8s / 44.0s
+
+# second, gentler burst (10 requests, 1s gap, 64 tokens)
+requests=10 wall=11.7s out_tok=512  out_tok/s=43.9
+client ttft p50/p95: 0.5s  / 0.5s       # idle server: prompt heads are cached
+client e2e  p50/p95: 11.0s / 11.3s
+```
+
+`GET /metrics` (rendered by hand in `miniserve/api/routers/metrics.py`, no
+prometheus_client) now exports six latency histograms on top of the counters,
+and the finished counter carries a `reason` label. Snapshot in
+`output/output-metrics.txt`:
+
+```text
+miniserve_requests_finished_total{model_name="Qwen/Qwen3-0.6B",reason="abort"} 1
+miniserve_requests_finished_total{model_name="Qwen/Qwen3-0.6B",reason="length"} 38
+miniserve_time_to_first_token_seconds_count{model_name="Qwen/Qwen3-0.6B"} 39
+miniserve_inter_token_latency_seconds_count{model_name="Qwen/Qwen3-0.6B"} 3392
+miniserve_step_duration_seconds_count{model_name="Qwen/Qwen3-0.6B"} 745
+```
+
+Checked end-to-end per `docs/MONITORING.md` §7: `promtool check config` passes,
+the `miniserve` target is UP at `localhost:9090/targets`, and the percentile
+incantation returns real numbers, not `NaN`:
+
+```promql
+histogram_quantile(0.95, sum by (le) (rate(miniserve_time_to_first_token_seconds_bucket[1m])))
+# -> 1.75s during the saturated burst; mean TTFT 303ms, prefix cache hit 64.3%
+```
+
+Grafana dashboard (`deploy/grafana/dashboards/miniserve.json`) — percentiles,
+throughput, queue depth, KV usage and the finish-reason split, all fed by
+Prometheus:
+
+![Grafana dashboard](output/screenshots/grafana-dashboard.png)
+
+Serve logs reach Grafana through promtail → Loki (client disconnects show up as
+`reason="abort"` in the metrics and as access-log lines in the panel):
+
+![Loki serve logs](output/screenshots/grafana-loki-logs.png)
+
+Prometheus target page — `miniserve` is scraped every 5s through
+`host.docker.internal`; a DOWN here almost always means the server was bound to
+`127.0.0.1` instead of `0.0.0.0`:
+
+![Prometheus targets](output/screenshots/prometheus-targets.png)
+
 ### Architecture
 ```mermaid
 flowchart LR

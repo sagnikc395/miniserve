@@ -1,0 +1,121 @@
+# GET /metrics snapshot right after the load run (Qwen/Qwen3-0.6B)
+# TYPE miniserve_requests_total counter
+miniserve_requests_total{model_name="Qwen/Qwen3-0.6B"} 39
+# TYPE miniserve_prompt_tokens_total counter
+miniserve_prompt_tokens_total{model_name="Qwen/Qwen3-0.6B"} 742
+# TYPE miniserve_generation_tokens_total counter
+miniserve_generation_tokens_total{model_name="Qwen/Qwen3-0.6B"} 3431
+# TYPE miniserve_prefix_cache_hit_tokens_total counter
+miniserve_prefix_cache_hit_tokens_total{model_name="Qwen/Qwen3-0.6B"} 384
+# TYPE miniserve_preemptions_total counter
+miniserve_preemptions_total{model_name="Qwen/Qwen3-0.6B"} 0
+# TYPE miniserve_requests_finished_total counter
+miniserve_requests_finished_total{model_name="Qwen/Qwen3-0.6B",reason="abort"} 1
+miniserve_requests_finished_total{model_name="Qwen/Qwen3-0.6B",reason="length"} 38
+# TYPE miniserve_num_requests_running gauge
+miniserve_num_requests_running{model_name="Qwen/Qwen3-0.6B"} 0
+# TYPE miniserve_num_requests_waiting gauge
+miniserve_num_requests_waiting{model_name="Qwen/Qwen3-0.6B"} 0
+# TYPE miniserve_kv_cache_usage_ratio gauge
+miniserve_kv_cache_usage_ratio{model_name="Qwen/Qwen3-0.6B"} 0.0
+# TYPE miniserve_kv_cache_used_blocks gauge
+miniserve_kv_cache_used_blocks{model_name="Qwen/Qwen3-0.6B"} 0
+# TYPE miniserve_kv_cache_total_blocks gauge
+miniserve_kv_cache_total_blocks{model_name="Qwen/Qwen3-0.6B"} 4096
+# TYPE miniserve_step_batched_tokens gauge
+miniserve_step_batched_tokens{model_name="Qwen/Qwen3-0.6B"} 9
+# TYPE miniserve_uptime_seconds gauge
+miniserve_uptime_seconds{model_name="Qwen/Qwen3-0.6B"} 347.05718183517456
+# TYPE miniserve_request_queue_time_seconds histogram
+miniserve_request_queue_time_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.01"} 31
+miniserve_request_queue_time_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.025"} 31
+miniserve_request_queue_time_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.05"} 31
+miniserve_request_queue_time_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.1"} 31
+miniserve_request_queue_time_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.25"} 31
+miniserve_request_queue_time_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.5"} 31
+miniserve_request_queue_time_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="1"} 31
+miniserve_request_queue_time_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="2.5"} 31
+miniserve_request_queue_time_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="5"} 31
+miniserve_request_queue_time_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="10"} 31
+miniserve_request_queue_time_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="30"} 39
+miniserve_request_queue_time_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="60"} 39
+miniserve_request_queue_time_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="+Inf"} 39
+miniserve_request_queue_time_seconds_sum{model_name="Qwen/Qwen3-0.6B"} 173.9778624130413
+miniserve_request_queue_time_seconds_count{model_name="Qwen/Qwen3-0.6B"} 39
+# TYPE miniserve_time_to_first_token_seconds histogram
+miniserve_time_to_first_token_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.01"} 0
+miniserve_time_to_first_token_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.025"} 0
+miniserve_time_to_first_token_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.05"} 0
+miniserve_time_to_first_token_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.1"} 0
+miniserve_time_to_first_token_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.25"} 10
+miniserve_time_to_first_token_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.5"} 12
+miniserve_time_to_first_token_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="1"} 29
+miniserve_time_to_first_token_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="2.5"} 30
+miniserve_time_to_first_token_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="5"} 31
+miniserve_time_to_first_token_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="10"} 31
+miniserve_time_to_first_token_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="30"} 39
+miniserve_time_to_first_token_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="60"} 39
+miniserve_time_to_first_token_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="+Inf"} 39
+miniserve_time_to_first_token_seconds_sum{model_name="Qwen/Qwen3-0.6B"} 192.99559987522662
+miniserve_time_to_first_token_seconds_count{model_name="Qwen/Qwen3-0.6B"} 39
+# TYPE miniserve_e2e_request_latency_seconds histogram
+miniserve_e2e_request_latency_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.01"} 0
+miniserve_e2e_request_latency_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.025"} 0
+miniserve_e2e_request_latency_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.05"} 0
+miniserve_e2e_request_latency_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.1"} 0
+miniserve_e2e_request_latency_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.25"} 0
+miniserve_e2e_request_latency_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.5"} 0
+miniserve_e2e_request_latency_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="1"} 0
+miniserve_e2e_request_latency_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="2.5"} 1
+miniserve_e2e_request_latency_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="5"} 3
+miniserve_e2e_request_latency_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="10"} 13
+miniserve_e2e_request_latency_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="30"} 30
+miniserve_e2e_request_latency_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="60"} 38
+miniserve_e2e_request_latency_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="+Inf"} 38
+miniserve_e2e_request_latency_seconds_sum{model_name="Qwen/Qwen3-0.6B"} 823.5523477541283
+miniserve_e2e_request_latency_seconds_count{model_name="Qwen/Qwen3-0.6B"} 38
+# TYPE miniserve_time_per_output_token_seconds histogram
+miniserve_time_per_output_token_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.005"} 0
+miniserve_time_per_output_token_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.01"} 0
+miniserve_time_per_output_token_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.02"} 0
+miniserve_time_per_output_token_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.03"} 3
+miniserve_time_per_output_token_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.05"} 4
+miniserve_time_per_output_token_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.075"} 4
+miniserve_time_per_output_token_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.1"} 4
+miniserve_time_per_output_token_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.15"} 4
+miniserve_time_per_output_token_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.25"} 38
+miniserve_time_per_output_token_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.5"} 38
+miniserve_time_per_output_token_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="1"} 38
+miniserve_time_per_output_token_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="+Inf"} 38
+miniserve_time_per_output_token_seconds_sum{model_name="Qwen/Qwen3-0.6B"} 7.128637787347329
+miniserve_time_per_output_token_seconds_count{model_name="Qwen/Qwen3-0.6B"} 38
+# TYPE miniserve_inter_token_latency_seconds histogram
+miniserve_inter_token_latency_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.005"} 0
+miniserve_inter_token_latency_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.01"} 0
+miniserve_inter_token_latency_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.02"} 0
+miniserve_inter_token_latency_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.03"} 440
+miniserve_inter_token_latency_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.05"} 481
+miniserve_inter_token_latency_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.075"} 697
+miniserve_inter_token_latency_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.1"} 787
+miniserve_inter_token_latency_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.15"} 1025
+miniserve_inter_token_latency_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.25"} 2546
+miniserve_inter_token_latency_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.5"} 3390
+miniserve_inter_token_latency_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="1"} 3392
+miniserve_inter_token_latency_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="+Inf"} 3392
+miniserve_inter_token_latency_seconds_sum{model_name="Qwen/Qwen3-0.6B"} 631.440567961894
+miniserve_inter_token_latency_seconds_count{model_name="Qwen/Qwen3-0.6B"} 3392
+# TYPE miniserve_step_duration_seconds histogram
+miniserve_step_duration_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.005"} 0
+miniserve_step_duration_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.01"} 0
+miniserve_step_duration_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.02"} 0
+miniserve_step_duration_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.03"} 440
+miniserve_step_duration_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.05"} 481
+miniserve_step_duration_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.075"} 502
+miniserve_step_duration_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.1"} 512
+miniserve_step_duration_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.15"} 532
+miniserve_step_duration_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.25"} 666
+miniserve_step_duration_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="0.5"} 739
+miniserve_step_duration_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="1"} 743
+miniserve_step_duration_seconds_bucket{model_name="Qwen/Qwen3-0.6B",le="+Inf"} 745
+miniserve_step_duration_seconds_sum{model_name="Qwen/Qwen3-0.6B"} 74.74614816624671
+miniserve_step_duration_seconds_count{model_name="Qwen/Qwen3-0.6B"} 745
