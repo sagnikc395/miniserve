@@ -193,6 +193,12 @@ client e2e  p50/p95: 22.8s / 44.0s
 requests=10 wall=11.7s out_tok=512  out_tok/s=43.9
 client ttft p50/p95: 0.5s  / 0.5s       # idle server: prompt heads are cached
 client e2e  p50/p95: 11.0s / 11.3s
+
+# third burst for the KV panels (16 requests, 0.6s gap, 128 tokens)
+requests=16 wall=36.0s out_tok=1664 out_tok/s=46.2
+client ttft p50/p95: 1.3s  / 2.0s
+client e2e  p50/p95: 36.0s / 36.2s
+# KV peak during this burst: ~110 used blocks of 4096 (2.7%)
 ```
 
 `GET /metrics` (rendered by hand in `miniserve/api/routers/metrics.py`, no
@@ -217,9 +223,13 @@ histogram_quantile(0.95, sum by (le) (rate(miniserve_time_to_first_token_seconds
 # -> 1.75s during the saturated burst; mean TTFT 303ms, prefix cache hit 64.3%
 ```
 
-Grafana dashboard (`deploy/grafana/dashboards/miniserve.json`) — percentiles,
-throughput, queue depth, KV usage and the finish-reason split, all fed by
-Prometheus:
+Grafana dashboard (`deploy/grafana/dashboards/miniserve.json`) — three
+sections: **Latency** (TTFT p50/p95/p99, TPOT, ITL, E2E, queue, step time,
+mean-TTFT stat), **KV cache & batch load** (usage gauge labeled with the
+serving model, usage-over-time with used blocks on a right axis, used-vs-total
+blocks, running/waiting, batch fill + preemptions, finish-reason split), and
+**Throughput + Logs** (tokens/s, prefix-cache hit, uptime, request count, plus
+two Loki panels: all serve logs and `POST /v1/` completion requests only):
 
 ![Grafana dashboard](output/screenshots/grafana-dashboard.png)
 
